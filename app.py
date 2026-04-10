@@ -291,7 +291,7 @@ def get_fx_rates():
 
 
 def fetch_stock_data(ticker: str) -> dict | None:
-    """개별 종목 데이터 조회 (fast_info + income_stmt, 인증 불필요)"""
+    """개별 종목 데이터 조회 (fast_info + history + income_stmt)"""
     try:
         stock = yf.Ticker(ticker)
 
@@ -310,8 +310,21 @@ def fetch_stock_data(ticker: str) -> dict | None:
         prev_close = fi.get("previousClose", 0) or fi.get("previous_close", 0)
         chg_pct = ((price - prev_close) / prev_close * 100) if prev_close and price else 0
 
-        # 매출액: income_stmt에서 조회
+        # 거래량 + 거래일: history에서 조회
+        volume = 0
+        volume_date = ""
+        try:
+            hist = stock.history(period="5d")
+            if hist is not None and not hist.empty:
+                last_row = hist.iloc[-1]
+                volume = int(last_row.get("Volume", 0))
+                volume_date = str(hist.index[-1].date())
+        except Exception:
+            pass
+
+        # 매출액 + 순이익: income_stmt에서 조회
         revenue = 0
+        net_income = 0
         try:
             inc = stock.income_stmt
             if inc is not None and not inc.empty:
@@ -320,6 +333,12 @@ def fetch_stock_data(ticker: str) -> dict | None:
                         val = inc.loc[label].dropna()
                         if not val.empty:
                             revenue = int(val.iloc[0])
+                            break
+                for label in ["Net Income", "Net Income Common Stockholders"]:
+                    if label in inc.index:
+                        val = inc.loc[label].dropna()
+                        if not val.empty:
+                            net_income = int(val.iloc[0])
                             break
         except Exception:
             pass
@@ -335,10 +354,21 @@ def fetch_stock_data(ticker: str) -> dict | None:
                             if not val.empty:
                                 revenue = int(val.iloc[0])
                                 break
+                    if not net_income:
+                        for label in ["Net Income", "Net Income Common Stockholders"]:
+                            if label in fins.index:
+                                val = fins.loc[label].dropna()
+                                if not val.empty:
+                                    net_income = int(val.iloc[0])
+                                    break
             except Exception:
                 pass
 
         revenue_usd = revenue * rate if revenue else 0
+
+        # PER / PSR 계산
+        per = round(market_cap / net_income, 1) if net_income and net_income > 0 else None
+        psr = round(market_cap / revenue, 1) if revenue and revenue > 0 else None
 
         return {
             "ticker": ticker,
@@ -350,7 +380,37 @@ def fetch_stock_data(ticker: str) -> dict | None:
             "currency": currency,
             "price": price,
             "change_pct": round(chg_pct, 2),
+            "volume": volume,
+            "volume_date": volume_date,
+            "per": per,
+            "psr": psr,
         }
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600)
+def fetch_naver_consensus(stock_code: str) -> pd.DataFrame | None:
+    """네이버 증권에서 향후 3년 연간 컨센서스 (매출/영업이익) 조회"""
+    try:
+        url = f"https://navercomp.wisereport.co.kr/v2/company/ajax/cF1001.aspx"
+        params = {"cmp_cd": stock_code, "fin_typ": "0", "freq_typ": "Y"}
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://navercomp.wisereport.co.kr"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+
+        dfs = pd.read_html(r.text, encoding="utf-8")
+        if not dfs:
+            return None
+
+        # 첫 번째 테이블이 연간 재무 요약
+        df = dfs[0]
+        # 멀티인덱스 컬럼 평탄화
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [' '.join(str(c) for c in col).strip() for col in df.columns]
+
+        return df
     except Exception:
         return None
 
@@ -408,6 +468,10 @@ def fetch_sector_data(sector_name: str) -> dict:
                 "현재가": r["price"],
                 "등락률": r["change_pct"],
                 "통화": r["currency"],
+                "거래량": r["volume"],
+                "거래일": r["volume_date"],
+                "PER": r["per"],
+                "PSR": r["psr"],
             })
 
     gl_results = []
@@ -573,6 +637,13 @@ with tab1:
     df_rank["현재가표시"] = df_rank.apply(
         lambda r: f"{r['현재가']:,.0f}원" if r["통화"] == "KRW" else f"${r['현재가']:,.2f}", axis=1
     )
+    df_rank["거래량표시"] = df_rank["거래량"].apply(lambda x: f"{x:,.0f}" if x else "-")
+    df_rank["PER표시"] = df_rank["PER"].apply(lambda x: f"{x:.1f}" if x else "-")
+    df_rank["PSR표시"] = df_rank["PSR"].apply(lambda x: f"{x:.1f}" if x else "-")
+
+    # 거래 기준일 표시
+    vol_dates = [s["거래일"] for s in unique_stocks if s.get("거래일")]
+    vol_date_str = vol_dates[0] if vol_dates else ""
 
     # 주요 지표 카드
     col1, col2, col3, col4 = st.columns(4)
@@ -587,15 +658,18 @@ with tab1:
     with col4:
         st.metric("분석 업종", f"{len(selected_sectors)}개")
 
-    # 글로벌 순위 컬럼 추가
+    if vol_date_str:
+        st.caption(f"📅 거래량 기준일: **{vol_date_str}**")
+
+    # 글로벌 순위 컬럼
     df_rank["글로벌순위"] = df_rank["글로벌순위표시"]
     # 네이버증권 링크
     df_rank["네이버증권"] = df_rank["종목코드"].apply(
         lambda c: f"https://finance.naver.com/item/main.nhn?code={c}"
     )
 
-    # 랭킹 테이블
-    display_cols = ["순위", "업종", "종목코드", "기업명", "핵심강점", "글로벌순위", "현재가표시", "매출액", "점유율", "등락", "네이버증권"]
+    # 메인 테이블 (거래량 포함)
+    display_cols = ["순위", "업종", "종목코드", "기업명", "글로벌순위", "현재가표시", "등락", "거래량표시", "점유율", "네이버증권"]
     st.dataframe(
         df_rank[display_cols],
         use_container_width=True,
@@ -604,10 +678,44 @@ with tab1:
         column_config={
             "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
             "현재가표시": st.column_config.TextColumn("현재가"),
-            "매출액": st.column_config.TextColumn("매출액(연간)"),
+            "거래량표시": st.column_config.TextColumn("거래량"),
             "점유율": st.column_config.TextColumn("점유율(매출)"),
         },
     )
+
+    # 재무지표 (접기/펼치기)
+    with st.expander("📊 재무지표 보기 (PER · PSR · 매출액 · 시총)"):
+        fin_cols = ["순위", "종목코드", "기업명", "PER표시", "PSR표시", "매출액", "시총", "핵심강점"]
+        st.dataframe(
+            df_rank[fin_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "PER표시": st.column_config.TextColumn("PER"),
+                "PSR표시": st.column_config.TextColumn("PSR"),
+                "매출액": st.column_config.TextColumn("매출액(연간)"),
+            },
+        )
+
+    # 네이버 컨센서스 조회 (접기/펼치기)
+    with st.expander("🔮 네이버 증권 컨센서스 (향후 매출/영업이익 전망)"):
+        selected_code = st.selectbox(
+            "종목 선택",
+            options=[(s["종목코드"], s["기업명"]) for s in unique_stocks],
+            format_func=lambda x: f"{x[1]} ({x[0]})",
+            key="consensus_tab1",
+        )
+        if selected_code:
+            code = selected_code[0]
+            name = selected_code[1]
+            if st.button(f"📡 {name} 컨센서스 조회", key=f"btn_con_{code}"):
+                with st.spinner(f"{name} 컨센서스 조회 중..."):
+                    df_con = fetch_naver_consensus(code)
+                if df_con is not None and not df_con.empty:
+                    st.dataframe(df_con, use_container_width=True, hide_index=True)
+                    st.caption(f"📊 출처: 네이버 증권 (navercomp.wisereport.co.kr) | [네이버 증권에서 보기](https://finance.naver.com/item/coinfo.naver?code={code})")
+                else:
+                    st.warning(f"{name}: 컨센서스 데이터를 불러올 수 없습니다.")
 
 # ── 탭2: 업종별 상세 ──
 with tab2:
@@ -625,19 +733,24 @@ with tab2:
 
         with col_kr:
             st.markdown("**🇰🇷 국내 상장 기업**")
+            # 거래 기준일
+            kr_vol_dates = [k["거래일"] for k in data["kr"] if k.get("거래일")]
+            if kr_vol_dates:
+                st.caption(f"📅 거래량 기준일: **{kr_vol_dates[0]}**")
+
             kr_rows = []
             for k in sorted(data["kr"], key=lambda x: x["글로벌순위"]):
                 code = k["종목코드"]
                 price_str = f"{k['현재가']:,.0f}원" if k["통화"] == "KRW" else f"${k['현재가']:,.2f}"
+                vol_str = f"{k['거래량']:,.0f}" if k.get("거래량") else "-"
                 kr_rows.append({
                     "글로벌순위": k["글로벌순위표시"],
                     "종목코드": code,
                     "기업명": k["기업명"],
-                    "핵심강점": k["핵심강점"],
                     "현재가": price_str,
-                    "매출액": format_krw(k["매출액(원)"]),
-                    "점유율(매출)": f"{k['매출기준점유율']:.1f}%",
                     "등락": f"{'🔺' if k['등락률'] > 0 else '🔻' if k['등락률'] < 0 else '▬'}{abs(k['등락률']):.1f}%",
+                    "거래량": vol_str,
+                    "점유율(매출)": f"{k['매출기준점유율']:.1f}%",
                     "네이버증권": f"https://finance.naver.com/item/main.nhn?code={code}",
                 })
             kr_df = pd.DataFrame(kr_rows)
@@ -649,6 +762,36 @@ with tab2:
                     "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
                 },
             )
+
+            # 재무지표 + 컨센서스 (접기/펼치기)
+            with st.expander("📊 재무지표 · 컨센서스 보기"):
+                fin_rows = []
+                for k in sorted(data["kr"], key=lambda x: x["글로벌순위"]):
+                    fin_rows.append({
+                        "종목코드": k["종목코드"],
+                        "기업명": k["기업명"],
+                        "PER": f"{k['PER']:.1f}" if k.get("PER") else "-",
+                        "PSR": f"{k['PSR']:.1f}" if k.get("PSR") else "-",
+                        "매출액": format_krw(k["매출액(원)"]),
+                        "핵심강점": k["핵심강점"],
+                    })
+                st.dataframe(pd.DataFrame(fin_rows), use_container_width=True, hide_index=True)
+
+                # 컨센서스
+                sel = st.selectbox(
+                    "컨센서스 조회할 종목",
+                    [(k["종목코드"], k["기업명"]) for k in data["kr"]],
+                    format_func=lambda x: f"{x[1]} ({x[0]})",
+                    key=f"con_sel_{sector_name}",
+                )
+                if sel and st.button(f"📡 {sel[1]} 컨센서스 조회", key=f"btn_{sector_name}_{sel[0]}"):
+                    with st.spinner(f"{sel[1]} 조회 중..."):
+                        df_con = fetch_naver_consensus(sel[0])
+                    if df_con is not None and not df_con.empty:
+                        st.dataframe(df_con, use_container_width=True, hide_index=True)
+                        st.caption(f"출처: 네이버 증권 | [네이버에서 보기](https://finance.naver.com/item/coinfo.naver?code={sel[0]})")
+                    else:
+                        st.warning("컨센서스 데이터를 불러올 수 없습니다.")
 
         with col_gl:
             st.markdown("**🌍 글로벌 경쟁사 (참고)**")
