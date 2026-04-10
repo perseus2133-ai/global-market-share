@@ -493,7 +493,7 @@ with tab1:
     # 중복 제거 (같은 종목이 여러 업종에 있을 수 있음)
     seen = set()
     unique_stocks = []
-    for s in sorted(all_kr_stocks, key=lambda x: x["글로벌점유율"], reverse=True):
+    for s in sorted(all_kr_stocks, key=lambda x: x["매출기준점유율"], reverse=True):
         if s["종목코드"] not in seen:
             seen.add(s["종목코드"])
             unique_stocks.append(s)
