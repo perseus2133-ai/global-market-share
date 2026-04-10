@@ -323,11 +323,25 @@ def fetch_sector_data(sector_name: str) -> dict:
 
     total_cap = sum(r["market_cap_usd"] for r in results.values()) or 1
 
+    # 전체 기업을 시가총액 순으로 정렬하여 글로벌 순위 부여
+    all_companies = []
+    kr_ticker_set = {t for t, _ in kr_tickers}
+    for ticker, data in results.items():
+        all_companies.append({
+            "ticker": ticker,
+            "market_cap_usd": data["market_cap_usd"],
+            "is_kr": ticker in kr_ticker_set,
+        })
+    all_companies.sort(key=lambda x: x["market_cap_usd"], reverse=True)
+    global_rank_map = {c["ticker"]: i + 1 for i, c in enumerate(all_companies)}
+    total_companies = len(all_companies)
+
     kr_results = []
     for ticker, name, desc in sector["kr"]:
         if ticker in results:
             r = results[ticker]
             share = r["market_cap_usd"] / total_cap * 100
+            rank = global_rank_map.get(ticker, 0)
             kr_results.append({
                 "종목코드": ticker.replace(".KS", "").replace(".KQ", ""),
                 "기업명": name,
@@ -335,6 +349,9 @@ def fetch_sector_data(sector_name: str) -> dict:
                 "시가총액(원)": r["market_cap_local"],
                 "시가총액(USD)": r["market_cap_usd"],
                 "글로벌점유율": round(share, 1),
+                "글로벌순위": rank,
+                "전체기업수": total_companies,
+                "글로벌순위표시": f"{rank}/{total_companies}위",
                 "현재가": r["price"],
                 "등락률": r["change_pct"],
                 "통화": r["currency"],
@@ -345,11 +362,14 @@ def fetch_sector_data(sector_name: str) -> dict:
         if ticker in results:
             r = results[ticker]
             share = r["market_cap_usd"] / total_cap * 100
+            rank = global_rank_map.get(ticker, 0)
             gl_results.append({
                 "기업명": name,
                 "티커": ticker,
                 "시가총액(USD)": r["market_cap_usd"],
                 "글로벌점유율": round(share, 1),
+                "글로벌순위": rank,
+                "글로벌순위표시": f"{rank}/{total_companies}위",
             })
 
     kr_total_share = sum(k["글로벌점유율"] for k in kr_results)
@@ -489,8 +509,11 @@ with tab1:
     with col4:
         st.metric("분석 업종", f"{len(selected_sectors)}개")
 
+    # 글로벌 순위 컬럼 추가
+    df_rank["글로벌순위"] = df_rank["글로벌순위표시"]
+
     # 랭킹 테이블
-    display_cols = ["순위", "업종", "종목코드", "기업명", "핵심강점", "시총(원)", "점유율", "등락"]
+    display_cols = ["순위", "업종", "종목코드", "기업명", "핵심강점", "글로벌순위", "시총(원)", "점유율", "등락"]
     st.dataframe(
         df_rank[display_cols],
         use_container_width=True,
@@ -512,32 +535,42 @@ with tab2:
 
         col_kr, col_gl = st.columns([3, 2])
 
-        with col_kr:
-            st.markdown("**🇰🇷 한국 기업**")
-            kr_df = pd.DataFrame(data["kr"])
-            kr_df["시총"] = kr_df["시가총액(원)"].apply(format_krw)
-            kr_df["점유율"] = kr_df["글로벌점유율"].apply(lambda x: f"{x:.1f}%")
-            kr_df["등락"] = kr_df["등락률"].apply(lambda x: f"{'🔺' if x > 0 else '🔻' if x < 0 else '▬'}{abs(x):.1f}%")
-            st.dataframe(
-                kr_df[["종목코드", "기업명", "핵심강점", "시총", "점유율", "등락"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+        # 한국 + 글로벌 통합 순위 테이블
+        st.markdown("**🏆 업종 내 글로벌 순위 (시가총액 기준)**")
 
-        with col_gl:
-            st.markdown("**🌍 글로벌 경쟁사**")
-            if data["global"]:
-                gl_df = pd.DataFrame(data["global"])
-                gl_df["시총"] = gl_df["시가총액(USD)"].apply(format_usd)
-                gl_df["점유율"] = gl_df["글로벌점유율"].apply(lambda x: f"{x:.1f}%")
-                st.dataframe(
-                    gl_df[["기업명", "티커", "시총", "점유율"]],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("경쟁사 데이터 없음")
+        combined_rows = []
+        for k in data["kr"]:
+            combined_rows.append({
+                "순위": k["글로벌순위"],
+                "구분": "🇰🇷",
+                "기업명": k["기업명"],
+                "종목/티커": k["종목코드"],
+                "핵심강점": k["핵심강점"],
+                "시총": format_krw(k["시가총액(원)"]) + f" ({format_usd(k['시가총액(USD)'])})",
+                "점유율": f"{k['글로벌점유율']:.1f}%",
+                "등락": f"{'🔺' if k['등락률'] > 0 else '🔻' if k['등락률'] < 0 else '▬'}{abs(k['등락률']):.1f}%",
+                "_sort": k["글로벌순위"],
+            })
+        for g in data["global"]:
+            combined_rows.append({
+                "순위": g["글로벌순위"],
+                "구분": "🌍",
+                "기업명": g["기업명"],
+                "종목/티커": g["티커"],
+                "핵심강점": "",
+                "시총": format_usd(g["시가총액(USD)"]),
+                "점유율": f"{g['글로벌점유율']:.1f}%",
+                "등락": "",
+                "_sort": g["글로벌순위"],
+            })
 
+        combined_rows.sort(key=lambda x: x["_sort"])
+        combined_df = pd.DataFrame(combined_rows)
+        st.dataframe(
+            combined_df[["순위", "구분", "기업명", "종목/티커", "핵심강점", "시총", "점유율", "등락"]],
+            use_container_width=True,
+            hide_index=True,
+        )
         st.divider()
 
 # ── 탭3: 차트 ──
