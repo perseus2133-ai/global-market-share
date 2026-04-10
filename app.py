@@ -264,85 +264,66 @@ def get_fx_rates():
     return rates
 
 
-@st.cache_resource(ttl=1800)
-def get_yahoo_session():
-    """Yahoo Finance REST API 세션 (쿠키/크럼 인증, 30분 캐시)"""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
-    crumb = None
-    try:
-        session.get("https://fc.yahoo.com", timeout=10, allow_redirects=True)
-        r = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
-        if r.status_code == 200:
-            crumb = r.text
-    except Exception:
-        pass
-    return session, crumb
-
-
 def fetch_stock_data(ticker: str) -> dict | None:
-    """개별 종목 시가총액 + 매출액 조회 (REST API 직접 호출)"""
-    session, crumb = get_yahoo_session()
-    if not crumb:
-        return None
+    """개별 종목 데이터 조회 (fast_info + income_stmt, 인증 불필요)"""
     try:
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        params = {
-            "modules": "price,financialData,incomeStatementHistory",
-            "crumb": crumb,
-        }
-        r = session.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return None
+        stock = yf.Ticker(ticker)
 
-        result = r.json().get("quoteSummary", {}).get("result")
-        if not result:
-            return None
-
-        data = result[0]
-        p = data.get("price", {})
-        fd = data.get("financialData", {})
-
-        # 시가총액
-        mc_raw = p.get("marketCap", {})
-        market_cap = mc_raw.get("raw") if isinstance(mc_raw, dict) else mc_raw
+        # fast_info: v8 chart API 사용 (인증 불필요, Streamlit Cloud 호환)
+        fi = stock.fast_info
+        market_cap = fi.get("marketCap", 0) or fi.get("market_cap", 0)
         if not market_cap:
             return None
 
-        currency = p.get("currency", "USD")
+        currency = fi.get("currency", "USD")
         fx = get_fx_rates()
         rate = fx.get(currency, 1.0)
         market_cap_usd = market_cap * rate
 
-        # 매출액: financialData 먼저, 없으면 incomeStatementHistory에서
-        rev_raw = fd.get("totalRevenue", {})
-        revenue = rev_raw.get("raw") if isinstance(rev_raw, dict) else rev_raw
-        if not revenue:
-            ish = data.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
-            if ish:
-                rev_is = ish[0].get("totalRevenue", {})
-                revenue = rev_is.get("raw") if isinstance(rev_is, dict) else rev_is
-        revenue = revenue or 0
-        revenue_usd = revenue * rate if revenue else 0
+        price = fi.get("lastPrice", 0) or fi.get("last_price", 0)
+        prev_close = fi.get("previousClose", 0) or fi.get("previous_close", 0)
+        chg_pct = ((price - prev_close) / prev_close * 100) if prev_close and price else 0
 
-        # 현재가 / 등락률
-        price_raw = p.get("regularMarketPrice", {})
-        price = price_raw.get("raw", 0) if isinstance(price_raw, dict) else (price_raw or 0)
-        chg_raw = p.get("regularMarketChangePercent", {})
-        chg_pct = chg_raw.get("raw", 0) if isinstance(chg_raw, dict) else (chg_raw or 0)
+        # 매출액: income_stmt에서 조회
+        revenue = 0
+        try:
+            inc = stock.income_stmt
+            if inc is not None and not inc.empty:
+                for label in ["Total Revenue", "Operating Revenue", "Revenue"]:
+                    if label in inc.index:
+                        val = inc.loc[label].dropna()
+                        if not val.empty:
+                            revenue = int(val.iloc[0])
+                            break
+        except Exception:
+            pass
+
+        # income_stmt 실패 시 financials로 시도
+        if not revenue:
+            try:
+                fins = stock.financials
+                if fins is not None and not fins.empty:
+                    for label in ["Total Revenue", "Operating Revenue", "Revenue"]:
+                        if label in fins.index:
+                            val = fins.loc[label].dropna()
+                            if not val.empty:
+                                revenue = int(val.iloc[0])
+                                break
+            except Exception:
+                pass
+
+        revenue_usd = revenue * rate if revenue else 0
 
         return {
             "ticker": ticker,
-            "name": p.get("shortName", p.get("longName", ticker)),
+            "name": stock.ticker,
             "market_cap_usd": int(market_cap_usd),
             "market_cap_local": int(market_cap),
             "revenue_usd": int(revenue_usd),
             "revenue_local": int(revenue) if revenue else 0,
             "currency": currency,
             "price": price,
-            "change_pct": round(chg_pct * 100, 2) if abs(chg_pct) < 1 else round(chg_pct, 2),
+            "change_pct": round(chg_pct, 2),
         }
     except Exception:
         return None
@@ -518,7 +499,28 @@ for i, sector_name in enumerate(selected_sectors):
 progress.empty()
 
 if not all_kr_stocks:
-    st.warning("조회된 데이터가 없습니다.")
+    st.error("조회된 데이터가 없습니다.")
+    # 디버그 정보 표시
+    with st.expander("🔧 디버그 정보"):
+        st.write("**환율 데이터:**", get_fx_rates())
+        test_ticker = "005930.KS"
+        st.write(f"**테스트 종목 ({test_ticker}):**")
+        try:
+            t = yf.Ticker(test_ticker)
+            fi = t.fast_info
+            st.write("fast_info 키:", list(fi.keys()) if hasattr(fi, 'keys') else dir(fi))
+            st.write("fast_info 내용:", {k: fi[k] for k in ['marketCap', 'market_cap', 'lastPrice', 'last_price', 'currency'] if k in fi})
+        except Exception as e:
+            st.write(f"fast_info 에러: {e}")
+        try:
+            inc = t.income_stmt
+            st.write("income_stmt shape:", inc.shape if inc is not None else "None")
+            if inc is not None and not inc.empty:
+                st.write("income_stmt index:", list(inc.index[:10]))
+        except Exception as e:
+            st.write(f"income_stmt 에러: {e}")
+        result = fetch_stock_data(test_ticker)
+        st.write(f"**fetch_stock_data 결과:** {result}")
     st.stop()
 
 # ── 탭 구성 ──
