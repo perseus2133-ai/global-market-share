@@ -1,0 +1,658 @@
+"""
+글로벌 점유율 높은 국내 알짜 종목 찾기
+- 소재/부품/장비, 화장품, 의류 등 니치 글로벌 강자 발굴
+- Streamlit 기반 웹 앱
+"""
+
+import streamlit as st
+import pandas as pd
+import requests
+import plotly.express as px
+import plotly.graph_objects as go
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
+st.set_page_config(
+    page_title="글로벌 점유율 국내 알짜 종목",
+    page_icon="🔍",
+    layout="wide",
+)
+
+# ──────────────────────────────────────────────
+# 업종별 데이터: 한국 기업 + 글로벌 경쟁사
+# 각 기업에 "글로벌 점유율 추정치"와 "핵심 제품/강점" 포함
+# ──────────────────────────────────────────────
+SECTOR_DATA = {
+    # ── 반도체 장비 ──
+    "반도체 장비": {
+        "description": "반도체 후공정 장비, 테스트 장비, 검사 장비 등",
+        "kr": [
+            ("042700.KQ", "한미반도체", "글로벌 TC본더 점유율 80%+, 후공정 핵심장비"),
+            ("058470.KS", "리노공업", "반도체 테스트 소켓 글로벌 점유율 30%+"),
+            ("095340.KQ", "ISC", "IC 테스트소켓 글로벌 2위"),
+            ("131970.KQ", "테스나", "반도체 후공정 테스트 전문"),
+            ("036930.KQ", "주성엔지니어링", "ALD 증착장비 글로벌 3위권"),
+            ("321370.KQ", "테스", "CVD/ALD 장비 글로벌 경쟁력"),
+        ],
+        "global": [
+            ("ASML", "ASML"),
+            ("AMAT", "Applied Materials"),
+            ("LRCX", "Lam Research"),
+            ("KLAC", "KLA Corp"),
+            ("TER", "Teradyne"),
+        ],
+    },
+    # ── 반도체/디스플레이 소재 ──
+    "반도체/디스플레이 소재": {
+        "description": "포토레지스트, 식각가스, CMP슬러리, OLED 소재 등",
+        "kr": [
+            ("005290.KS", "동진쎄미켐", "포토레지스트 국내 1위, EUV PR 개발"),
+            ("357780.KS", "솔브레인", "반도체 식각액 글로벌 점유율 20%+"),
+            ("272210.KQ", "한화솔루션", "참고"),
+            ("036490.KQ", "인사이트이노", "CMP패드 국산화"),
+            ("337930.KS", "브이티", "참고"),  # 화장품으로 이동
+            ("033240.KS", "자화전자", "카메라모듈 액추에이터 글로벌 1위"),
+            ("272290.KS", "이녹스첨단소재", "OLED 소재 글로벌 경쟁력"),
+        ],
+        "global": [
+            ("ENTG", "Entegris"),
+            ("CCMP", "CMC Materials"),
+        ],
+    },
+    # ── 2차전지 소재 ──
+    "2차전지 소재": {
+        "description": "양극재, 음극재, 전해액, 분리막 등 배터리 핵심 소재",
+        "kr": [
+            ("247540.KS", "에코프로비엠", "하이니켈 양극재 글로벌 Top3"),
+            ("003670.KS", "포스코퓨처엠", "양극재+음극재 글로벌 Top5"),
+            ("066970.KS", "엘앤에프", "양극재 글로벌 경쟁력"),
+            ("278280.KS", "천보", "전해질(LiFSI) 글로벌 1위"),
+            ("012030.KS", "선익시스템", "참고"),
+            ("208860.KS", "대동기어", "참고"),
+        ],
+        "global": [
+            ("ALB", "Albemarle"),
+            ("SQM", "SQM"),
+            ("BYDDY", "BYD"),
+        ],
+    },
+    # ── 화장품/K-뷰티 ──
+    "화장품/K-뷰티": {
+        "description": "K-뷰티 브랜드, ODM/OEM, 화장품 소재 등",
+        "kr": [
+            ("192820.KS", "코스맥스", "화장품 ODM 글로벌 1위"),
+            ("161890.KS", "한국콜마", "화장품 ODM 글로벌 2위"),
+            ("090430.KS", "아모레퍼시픽", "K-뷰티 대표, 글로벌 Top10"),
+            ("051900.KS", "LG생활건강", "후/숨 브랜드 아시아 강자"),
+            ("950130.KS", "엑스코그", "참고"),
+            ("078520.KQ", "에이블씨엔씨", "미샤 브랜드"),
+            ("263750.KQ", "펄어비스", "참고"),
+        ],
+        "global": [
+            ("EL", "Estee Lauder"),
+            ("COTY", "Coty"),
+            ("LRLCY", "L'Oreal"),
+        ],
+    },
+    # ── 의류/패션 ──
+    "의류/패션": {
+        "description": "글로벌 확장 중인 K-패션, OEM 의류 기업",
+        "kr": [
+            ("383220.KS", "F&F", "MLB/Discovery 글로벌 확장, 중국 대박"),
+            ("105630.KS", "한세실업", "의류 OEM 글로벌 Top5, 나이키/자라 납품"),
+            ("014680.KS", "한솔케미칼", "참고"),
+            ("002790.KS", "아모레G", "아모레퍼시픽 지주사"),
+        ],
+        "global": [
+            ("NKE", "Nike"),
+            ("ADDYY", "Adidas"),
+            ("LULU", "Lululemon"),
+            ("CPRI", "Capri Holdings"),
+        ],
+    },
+    # ── 자동차 부품 ──
+    "자동차 부품": {
+        "description": "전장부품, 모터, 변속기 등 글로벌 완성차 납품",
+        "kr": [
+            ("012330.KS", "현대모비스", "자동차 모듈/부품 글로벌 Top7"),
+            ("204320.KS", "만도", "조향/제동/ADAS 글로벌 경쟁력"),
+            ("298040.KS", "효성중공업", "전력기기 글로벌 Top5"),
+            ("018880.KS", "한온시스템", "차량 열관리 글로벌 1위"),
+            ("011210.KS", "현대위아", "4WD/AWD 구동계 글로벌 3위권"),
+        ],
+        "global": [
+            ("DNZOY", "Denso"),
+            ("BWA", "BorgWarner"),
+            ("APTV", "Aptiv"),
+            ("MGA", "Magna International"),
+        ],
+    },
+    # ── 조선/해양 장비 ──
+    "조선/해양": {
+        "description": "조선소, 선박엔진, 해양플랜트 기자재",
+        "kr": [
+            ("009540.KS", "HD한국조선해양", "조선 글로벌 1위 그룹"),
+            ("329180.KS", "HD현대중공업", "조선 수주 글로벌 Top3"),
+            ("042660.KS", "한화오션", "특수선/잠수함 강자"),
+            ("010140.KS", "삼성중공업", "LNG선 글로벌 Top3"),
+            ("082740.KS", "한화엔진", "선박엔진 글로벌 3위"),
+            ("267260.KS", "HD현대일렉트릭", "선박전기시스템 + 변압기 글로벌 강자"),
+        ],
+        "global": [
+            ("IMIRY", "Imabari(참고)"),
+        ],
+    },
+    # ── 방산/우주 ──
+    "방산/우주항공": {
+        "description": "K-방산 수출 급성장, 우주발사체 등",
+        "kr": [
+            ("012450.KS", "한화에어로스페이스", "항공엔진 + K9자주포 글로벌 수출"),
+            ("047810.KS", "한국항공우주", "KF-21, 훈련기(T-50) 글로벌 수출"),
+            ("079550.KS", "LIG넥스원", "유도무기/방공체계 수출 확대"),
+            ("067390.KQ", "현대로템", "K2전차 + 철도차량 수출"),
+        ],
+        "global": [
+            ("LMT", "Lockheed Martin"),
+            ("RTX", "RTX"),
+            ("NOC", "Northrop Grumman"),
+            ("BA", "Boeing"),
+            ("GD", "General Dynamics"),
+        ],
+    },
+    # ── 전자부품/수동소자 ──
+    "전자부품/수동소자": {
+        "description": "MLCC, 인덕터, 커넥터 등 핵심 전자부품",
+        "kr": [
+            ("009150.KS", "삼성전기", "MLCC 글로벌 2위(약 25%)"),
+            ("009970.KS", "영원무역홀딩스", "참고"),
+            ("241560.KQ", "두산테스나", "반도체 테스트 전문"),
+        ],
+        "global": [
+            ("6981.T", "Murata(무라타)"),
+            ("APH", "Amphenol"),
+            ("TEL", "TE Connectivity"),
+        ],
+    },
+    # ── 2차전지 장비 ──
+    "2차전지 장비": {
+        "description": "배터리 생산 장비, 검사 장비 등",
+        "kr": [
+            ("247540.KQ", "피엔티", "2차전지 전극공정 장비 Top"),
+            ("108320.KQ", "하이비젼시스템", "외관검사장비"),
+            ("900290.KQ", "GRT", "참고"),
+        ],
+        "global": [
+            ("6963.T", "Rohm(참고)"),
+        ],
+    },
+    # ── 음식/식품 ──
+    "식품/음료": {
+        "description": "K-푸드 글로벌 확장, 라면/김/소스 등",
+        "kr": [
+            ("271560.KS", "오리온", "초코파이 글로벌, 중국/러시아/베트남 1위급"),
+            ("097950.KS", "CJ제일제당", "비비고 만두 글로벌 1위, K-푸드 대표"),
+            ("003230.KS", "삼양식품", "불닭볶음면 글로벌 폭발 성장"),
+            ("021240.KS", "코웨이", "정수기/공기청정기 글로벌 1위"),
+        ],
+        "global": [
+            ("NSRGY", "Nestle"),
+            ("KHC", "Kraft Heinz"),
+            ("GIS", "General Mills"),
+        ],
+    },
+    # ── 게임 ──
+    "게임": {
+        "description": "글로벌 게임 시장 점유율 확대 중인 K-게임사",
+        "kr": [
+            ("259960.KS", "크래프톤", "배틀그라운드 글로벌 매출 Top"),
+            ("036570.KS", "엔씨소프트", "리니지 시리즈 아시아 강자"),
+            ("112040.KQ", "위메이드", "미르 시리즈"),
+            ("263750.KS", "펄어비스", "검은사막 글로벌"),
+        ],
+        "global": [
+            ("ATVI", "Activision(MS)"),
+            ("EA", "EA"),
+            ("TTWO", "Take-Two"),
+            ("NTES", "NetEase"),
+        ],
+    },
+    # ── 엔터테인먼트/K-콘텐츠 ──
+    "엔터/K-콘텐츠": {
+        "description": "K-POP, 드라마, 웹툰 등 한류 콘텐츠",
+        "kr": [
+            ("352820.KS", "하이브", "BTS/세븐틴, 글로벌 음악 시장 Top5 레이블"),
+            ("041510.KS", "에스엠", "에스파/NCT, 글로벌 K-POP"),
+            ("122870.KS", "와이지엔터", "블랙핑크, 글로벌 걸그룹 Top"),
+        ],
+        "global": [
+            ("WMG", "Warner Music"),
+            ("SPOT", "Spotify"),
+            ("UMG.AS", "Universal Music"),
+        ],
+    },
+    # ── 원자력/에너지 ──
+    "원자력/에너지 장비": {
+        "description": "원전 부품, SMR, 전력기기 등",
+        "kr": [
+            ("267260.KS", "HD현대일렉트릭", "변압기 글로벌 수주 급증"),
+            ("298040.KS", "효성중공업", "초고압 변압기/차단기 글로벌 Top5"),
+            ("009830.KS", "한화솔루션", "태양광 셀/모듈"),
+            ("034020.KS", "두산에너빌리티", "원전 주기기 글로벌 경쟁력"),
+        ],
+        "global": [
+            ("ETN", "Eaton"),
+            ("EMR", "Emerson Electric"),
+            ("GE", "GE Vernova"),
+        ],
+    },
+}
+
+
+# ──────────────────────────────────────────────
+# Yahoo Finance API 클라이언트
+# ──────────────────────────────────────────────
+@st.cache_resource(ttl=1800)
+def get_yahoo_client():
+    """Yahoo Finance 세션 초기화 (30분 캐시)"""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    })
+    try:
+        session.get("https://fc.yahoo.com", timeout=10, allow_redirects=True)
+        r = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        if r.status_code == 200:
+            return {"session": session, "crumb": r.text, "ok": True}
+    except Exception:
+        pass
+    return {"session": session, "crumb": None, "ok": False}
+
+
+@st.cache_data(ttl=600)
+def get_fx_rates():
+    """환율 조회 (10분 캐시)"""
+    client = get_yahoo_client()
+    session = client["session"]
+    rates = {"USD": 1.0}
+    pairs = {
+        "KRW": "KRWUSD=X", "JPY": "JPYUSD=X", "EUR": "EURUSD=X",
+        "GBP": "GBPUSD=X", "CNY": "CNYUSD=X", "HKD": "HKDUSD=X",
+        "TWD": "TWDUSD=X", "BRL": "BRLUSD=X",
+    }
+    for cur, pair in pairs.items():
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{pair}"
+            r = session.get(url, timeout=8)
+            if r.status_code == 200:
+                rate = r.json()["chart"]["result"][0]["meta"].get("regularMarketPrice", 0)
+                if rate:
+                    rates[cur] = rate
+        except Exception:
+            pass
+    return rates
+
+
+def fetch_market_cap(ticker: str) -> dict | None:
+    """개별 종목 시가총액 조회"""
+    client = get_yahoo_client()
+    if not client["ok"]:
+        return None
+    try:
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+        params = {"modules": "price", "crumb": client["crumb"]}
+        r = client["session"].get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            return None
+
+        result = r.json().get("quoteSummary", {}).get("result")
+        if not result:
+            return None
+
+        p = result[0].get("price", {})
+        mc = p.get("marketCap", {})
+        market_cap = mc.get("raw") if isinstance(mc, dict) else mc
+        if not market_cap:
+            return None
+
+        currency = p.get("currency", "USD")
+        fx = get_fx_rates()
+        rate = fx.get(currency, 1.0)
+        market_cap_usd = market_cap * rate
+
+        price_raw = p.get("regularMarketPrice", {})
+        price_val = price_raw.get("raw", 0) if isinstance(price_raw, dict) else price_raw
+
+        chg_raw = p.get("regularMarketChangePercent", {})
+        chg_pct = chg_raw.get("raw", 0) if isinstance(chg_raw, dict) else (chg_raw or 0)
+
+        return {
+            "ticker": ticker,
+            "name": p.get("shortName", p.get("longName", ticker)),
+            "market_cap_usd": int(market_cap_usd),
+            "market_cap_local": int(market_cap),
+            "currency": currency,
+            "price": price_val,
+            "change_pct": round(chg_pct * 100, 2) if chg_pct else 0,
+        }
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600)
+def fetch_sector_data(sector_name: str) -> dict:
+    """업종 전체 데이터 조회 (10분 캐시)"""
+    sector = SECTOR_DATA[sector_name]
+    kr_tickers = [(t, n) for t, n, _ in sector["kr"] if ".KS" in t or ".KQ" in t]
+    gl_tickers = [(t, n) for t, n in sector["global"]]
+    all_tickers = [t for t, _ in kr_tickers + gl_tickers]
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_market_cap, t): t for t in all_tickers}
+        for future in as_completed(futures):
+            ticker = futures[future]
+            data = future.result()
+            if data:
+                results[ticker] = data
+
+    total_cap = sum(r["market_cap_usd"] for r in results.values()) or 1
+
+    kr_results = []
+    for ticker, name, desc in sector["kr"]:
+        if ticker in results:
+            r = results[ticker]
+            share = r["market_cap_usd"] / total_cap * 100
+            kr_results.append({
+                "종목코드": ticker.replace(".KS", "").replace(".KQ", ""),
+                "기업명": name,
+                "핵심강점": desc,
+                "시가총액(원)": r["market_cap_local"],
+                "시가총액(USD)": r["market_cap_usd"],
+                "글로벌점유율": round(share, 1),
+                "현재가": r["price"],
+                "등락률": r["change_pct"],
+                "통화": r["currency"],
+            })
+
+    gl_results = []
+    for ticker, name in sector["global"]:
+        if ticker in results:
+            r = results[ticker]
+            share = r["market_cap_usd"] / total_cap * 100
+            gl_results.append({
+                "기업명": name,
+                "티커": ticker,
+                "시가총액(USD)": r["market_cap_usd"],
+                "글로벌점유율": round(share, 1),
+            })
+
+    kr_total_share = sum(k["글로벌점유율"] for k in kr_results)
+
+    return {
+        "kr": kr_results,
+        "global": gl_results,
+        "kr_total_share": round(kr_total_share, 1),
+        "total_cap": total_cap,
+        "fetched": len(results),
+        "total": len(all_tickers),
+    }
+
+
+def format_krw(val):
+    """원화 시가총액 포맷"""
+    if val >= 1e12:
+        return f"{val/1e12:.1f}조"
+    if val >= 1e8:
+        return f"{val/1e8:,.0f}억"
+    return f"{val:,.0f}"
+
+
+def format_usd(val):
+    """USD 시가총액 포맷"""
+    if val >= 1e12:
+        return f"${val/1e12:.2f}T"
+    if val >= 1e9:
+        return f"${val/1e9:.1f}B"
+    if val >= 1e6:
+        return f"${val/1e6:.0f}M"
+    return f"${val:,.0f}"
+
+
+# ──────────────────────────────────────────────
+# Streamlit UI
+# ──────────────────────────────────────────────
+
+st.title("🔍 글로벌 점유율 높은 국내 알짜 종목")
+st.caption("소부장(소재/부품/장비) · 화장품 · 의류 · 방산 · K-콘텐츠 등 니치 글로벌 강자 발굴")
+
+# 사이드바
+with st.sidebar:
+    st.header("⚙️ 설정")
+
+    # 업종 카테고리 분류
+    categories = {
+        "🔧 소재/부품/장비": ["반도체 장비", "반도체/디스플레이 소재", "2차전지 소재",
+                         "전자부품/수동소자", "2차전지 장비", "자동차 부품"],
+        "🚢 중공업/방산": ["조선/해양", "방산/우주항공", "원자력/에너지 장비"],
+        "💄 소비재/콘텐츠": ["화장품/K-뷰티", "의류/패션", "식품/음료", "게임", "엔터/K-콘텐츠"],
+    }
+
+    selected_sectors = []
+    for cat_name, cat_sectors in categories.items():
+        with st.expander(cat_name, expanded=True):
+            for s in cat_sectors:
+                if st.checkbox(s, value=True, key=f"cb_{s}"):
+                    selected_sectors.append(s)
+
+    st.divider()
+    if st.button("🔄 데이터 새로고침", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+# API 상태 확인
+client = get_yahoo_client()
+if not client["ok"]:
+    st.error("Yahoo Finance API 연결 실패. 잠시 후 다시 시도해 주세요.")
+    st.stop()
+
+fx = get_fx_rates()
+krw_rate = fx.get("KRW", 0)
+if krw_rate:
+    st.info(f"📡 실시간 데이터 | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분")
+
+if not selected_sectors:
+    st.warning("좌측에서 업종을 선택해 주세요.")
+    st.stop()
+
+# 전체 분석 실행
+all_kr_stocks = []
+sector_summaries = []
+
+progress = st.progress(0, text="데이터 수집 중...")
+for i, sector_name in enumerate(selected_sectors):
+    progress.progress((i + 1) / len(selected_sectors), text=f"[{sector_name}] 조회 중...")
+    data = fetch_sector_data(sector_name)
+
+    if data["kr"]:
+        for item in data["kr"]:
+            item["업종"] = sector_name
+        all_kr_stocks.extend(data["kr"])
+
+        sector_summaries.append({
+            "업종": sector_name,
+            "한국기업수": len(data["kr"]),
+            "한국합산점유율": data["kr_total_share"],
+            "업종전체시총": data["total_cap"],
+        })
+
+progress.empty()
+
+if not all_kr_stocks:
+    st.warning("조회된 데이터가 없습니다.")
+    st.stop()
+
+# ── 탭 구성 ──
+tab1, tab2, tab3 = st.tabs(["📊 종합 랭킹", "📋 업종별 상세", "📈 차트 분석"])
+
+# ── 탭1: 종합 랭킹 ──
+with tab1:
+    st.subheader("글로벌 점유율 TOP 종목 (시가총액 기준)")
+
+    # 중복 제거 (같은 종목이 여러 업종에 있을 수 있음)
+    seen = set()
+    unique_stocks = []
+    for s in sorted(all_kr_stocks, key=lambda x: x["글로벌점유율"], reverse=True):
+        if s["종목코드"] not in seen:
+            seen.add(s["종목코드"])
+            unique_stocks.append(s)
+
+    df_rank = pd.DataFrame(unique_stocks)
+    df_rank["순위"] = range(1, len(df_rank) + 1)
+    df_rank["시총(원)"] = df_rank["시가총액(원)"].apply(format_krw)
+    df_rank["시총(USD)"] = df_rank["시가총액(USD)"].apply(format_usd)
+    df_rank["점유율"] = df_rank["글로벌점유율"].apply(lambda x: f"{x:.1f}%")
+    df_rank["등락"] = df_rank["등락률"].apply(lambda x: f"{'🔺' if x > 0 else '🔻' if x < 0 else '▬'} {abs(x):.1f}%")
+
+    # 주요 지표 카드
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("분석 종목 수", f"{len(unique_stocks)}개")
+    with col2:
+        top_share = unique_stocks[0]["글로벌점유율"] if unique_stocks else 0
+        st.metric("최고 점유율", f"{top_share:.1f}%")
+    with col3:
+        avg_share = sum(s["글로벌점유율"] for s in unique_stocks) / len(unique_stocks) if unique_stocks else 0
+        st.metric("평균 점유율", f"{avg_share:.1f}%")
+    with col4:
+        st.metric("분석 업종", f"{len(selected_sectors)}개")
+
+    # 랭킹 테이블
+    display_cols = ["순위", "업종", "종목코드", "기업명", "핵심강점", "시총(원)", "점유율", "등락"]
+    st.dataframe(
+        df_rank[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        height=600,
+    )
+
+# ── 탭2: 업종별 상세 ──
+with tab2:
+    for sector_name in selected_sectors:
+        data = fetch_sector_data(sector_name)
+        if not data["kr"]:
+            continue
+
+        desc = SECTOR_DATA[sector_name]["description"]
+
+        st.subheader(f"{sector_name}")
+        st.caption(f"{desc} | 한국 합산 점유율: **{data['kr_total_share']}%** | 업종 시총: {format_usd(data['total_cap'])}")
+
+        col_kr, col_gl = st.columns([3, 2])
+
+        with col_kr:
+            st.markdown("**🇰🇷 한국 기업**")
+            kr_df = pd.DataFrame(data["kr"])
+            kr_df["시총"] = kr_df["시가총액(원)"].apply(format_krw)
+            kr_df["점유율"] = kr_df["글로벌점유율"].apply(lambda x: f"{x:.1f}%")
+            kr_df["등락"] = kr_df["등락률"].apply(lambda x: f"{'🔺' if x > 0 else '🔻' if x < 0 else '▬'}{abs(x):.1f}%")
+            st.dataframe(
+                kr_df[["종목코드", "기업명", "핵심강점", "시총", "점유율", "등락"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with col_gl:
+            st.markdown("**🌍 글로벌 경쟁사**")
+            if data["global"]:
+                gl_df = pd.DataFrame(data["global"])
+                gl_df["시총"] = gl_df["시가총액(USD)"].apply(format_usd)
+                gl_df["점유율"] = gl_df["글로벌점유율"].apply(lambda x: f"{x:.1f}%")
+                st.dataframe(
+                    gl_df[["기업명", "티커", "시총", "점유율"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("경쟁사 데이터 없음")
+
+        st.divider()
+
+# ── 탭3: 차트 ──
+with tab3:
+    st.subheader("업종별 한국 기업 글로벌 점유율")
+
+    if sector_summaries:
+        summary_df = pd.DataFrame(sector_summaries)
+        summary_df = summary_df.sort_values("한국합산점유율", ascending=True)
+
+        fig = px.bar(
+            summary_df,
+            x="한국합산점유율",
+            y="업종",
+            orientation="h",
+            text="한국합산점유율",
+            color="한국합산점유율",
+            color_continuous_scale="RdYlGn",
+        )
+        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig.update_layout(
+            height=max(400, len(summary_df) * 35),
+            xaxis_title="한국 기업 합산 점유율 (%)",
+            yaxis_title="",
+            showlegend=False,
+            coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # TOP 15 종목 점유율 차트
+    st.subheader("글로벌 점유율 TOP 15 국내 종목")
+    if unique_stocks:
+        top15 = unique_stocks[:15]
+        top15_df = pd.DataFrame(top15)
+        top15_df = top15_df.sort_values("글로벌점유율", ascending=True)
+
+        fig2 = px.bar(
+            top15_df,
+            x="글로벌점유율",
+            y="기업명",
+            orientation="h",
+            text="글로벌점유율",
+            color="업종",
+            hover_data=["종목코드", "핵심강점"],
+        )
+        fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig2.update_layout(
+            height=500,
+            xaxis_title="글로벌 점유율 (%)",
+            yaxis_title="",
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # 업종별 파이 차트
+    st.subheader("업종 선택하여 점유율 비교")
+    selected_pie = st.selectbox("업종 선택", selected_sectors)
+    if selected_pie:
+        pie_data = fetch_sector_data(selected_pie)
+        pie_items = []
+        for k in pie_data["kr"]:
+            pie_items.append({"기업": k["기업명"], "점유율": k["글로벌점유율"], "구분": "🇰🇷 한국"})
+        for g in pie_data["global"]:
+            pie_items.append({"기업": g["기업명"], "점유율": g["글로벌점유율"], "구분": "🌍 해외"})
+
+        if pie_items:
+            pie_df = pd.DataFrame(pie_items)
+            fig3 = px.pie(
+                pie_df,
+                values="점유율",
+                names="기업",
+                color="구분",
+                color_discrete_map={"🇰🇷 한국": "#FF6B6B", "🌍 해외": "#4ECDC4"},
+                hole=0.4,
+            )
+            fig3.update_layout(height=450)
+            st.plotly_chart(fig3, use_container_width=True)
+
+# 푸터
+st.divider()
+st.caption("💡 시가총액 기준 점유율은 실제 매출 기반 시장점유율과 다를 수 있습니다. 투자 참고용으로만 활용하세요.")
+st.caption("📊 데이터: Yahoo Finance | 환율 자동 변환(KRW→USD)")
