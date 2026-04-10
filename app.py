@@ -19,6 +19,28 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── 비밀번호 인증 ──
+def check_password():
+    """비밀번호 확인"""
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    st.title("🔒 로그인")
+    password = st.text_input("비밀번호를 입력하세요", type="password")
+    if st.button("로그인", use_container_width=True):
+        if password == st.secrets.get("password", "9084"):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 틀렸습니다.")
+    return False
+
+if not check_password():
+    st.stop()
+
 # ──────────────────────────────────────────────
 # 업종별 데이터: 한국 기업 + 글로벌 경쟁사
 # 각 기업에 "글로벌 점유율 추정치"와 "핵심 제품/강점" 포함
