@@ -495,6 +495,9 @@ with tab1:
     df_rank["시총(USD)"] = df_rank["시가총액(USD)"].apply(format_usd)
     df_rank["점유율"] = df_rank["글로벌점유율"].apply(lambda x: f"{x:.1f}%")
     df_rank["등락"] = df_rank["등락률"].apply(lambda x: f"{'🔺' if x > 0 else '🔻' if x < 0 else '▬'} {abs(x):.1f}%")
+    df_rank["현재가"] = df_rank.apply(
+        lambda r: f"{r['현재가']:,.0f}원" if r["통화"] == "KRW" else f"${r['현재가']:,.2f}", axis=1
+    )
 
     # 주요 지표 카드
     col1, col2, col3, col4 = st.columns(4)
@@ -511,14 +514,22 @@ with tab1:
 
     # 글로벌 순위 컬럼 추가
     df_rank["글로벌순위"] = df_rank["글로벌순위표시"]
+    # 네이버증권 링크
+    df_rank["네이버증권"] = df_rank["종목코드"].apply(
+        lambda c: f"https://finance.naver.com/item/main.nhn?code={c}"
+    )
 
     # 랭킹 테이블
-    display_cols = ["순위", "업종", "종목코드", "기업명", "핵심강점", "글로벌순위", "시총(원)", "점유율", "등락"]
+    display_cols = ["순위", "업종", "종목코드", "기업명", "핵심강점", "글로벌순위", "현재가", "시총(원)", "점유율", "등락", "네이버증권"]
     st.dataframe(
         df_rank[display_cols],
         use_container_width=True,
         hide_index=True,
         height=600,
+        column_config={
+            "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
+            "현재가": st.column_config.TextColumn("현재가"),
+        },
     )
 
 # ── 탭2: 업종별 상세 ──
@@ -540,15 +551,19 @@ with tab2:
 
         combined_rows = []
         for k in data["kr"]:
+            code = k["종목코드"]
+            price_str = f"{k['현재가']:,.0f}원" if k["통화"] == "KRW" else f"${k['현재가']:,.2f}"
             combined_rows.append({
                 "순위": k["글로벌순위"],
                 "구분": "🇰🇷",
                 "기업명": k["기업명"],
-                "종목/티커": k["종목코드"],
+                "종목/티커": code,
                 "핵심강점": k["핵심강점"],
+                "현재가": price_str,
                 "시총": format_krw(k["시가총액(원)"]) + f" ({format_usd(k['시가총액(USD)'])})",
                 "점유율": f"{k['글로벌점유율']:.1f}%",
                 "등락": f"{'🔺' if k['등락률'] > 0 else '🔻' if k['등락률'] < 0 else '▬'}{abs(k['등락률']):.1f}%",
+                "네이버증권": f"https://finance.naver.com/item/main.nhn?code={code}",
                 "_sort": k["글로벌순위"],
             })
         for g in data["global"]:
@@ -558,18 +573,23 @@ with tab2:
                 "기업명": g["기업명"],
                 "종목/티커": g["티커"],
                 "핵심강점": "",
+                "현재가": "",
                 "시총": format_usd(g["시가총액(USD)"]),
                 "점유율": f"{g['글로벌점유율']:.1f}%",
                 "등락": "",
+                "네이버증권": "",
                 "_sort": g["글로벌순위"],
             })
 
         combined_rows.sort(key=lambda x: x["_sort"])
         combined_df = pd.DataFrame(combined_rows)
         st.dataframe(
-            combined_df[["순위", "구분", "기업명", "종목/티커", "핵심강점", "시총", "점유율", "등락"]],
+            combined_df[["순위", "구분", "기업명", "종목/티커", "핵심강점", "현재가", "시총", "점유율", "등락", "네이버증권"]],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
+            },
         )
         st.divider()
 
