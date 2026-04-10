@@ -10,6 +10,7 @@ import requests
 import plotly.express as px
 import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import yfinance as yf
 import time
 
 st.set_page_config(
@@ -249,30 +250,11 @@ SECTOR_DATA = {
 
 
 # ──────────────────────────────────────────────
-# Yahoo Finance API 클라이언트
+# Yahoo Finance 데이터 조회 (yfinance + REST fallback)
 # ──────────────────────────────────────────────
-@st.cache_resource(ttl=1800)
-def get_yahoo_client():
-    """Yahoo Finance 세션 초기화 (30분 캐시)"""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
-    try:
-        session.get("https://fc.yahoo.com", timeout=10, allow_redirects=True)
-        r = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
-        if r.status_code == 200:
-            return {"session": session, "crumb": r.text, "ok": True}
-    except Exception:
-        pass
-    return {"session": session, "crumb": None, "ok": False}
-
-
 @st.cache_data(ttl=600)
 def get_fx_rates():
     """환율 조회 (10분 캐시)"""
-    client = get_yahoo_client()
-    session = client["session"]
     rates = {"USD": 1.0}
     pairs = {
         "KRW": "KRWUSD=X", "JPY": "JPYUSD=X", "EUR": "EURUSD=X",
@@ -281,58 +263,42 @@ def get_fx_rates():
     }
     for cur, pair in pairs.items():
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{pair}"
-            r = session.get(url, timeout=8)
-            if r.status_code == 200:
-                rate = r.json()["chart"]["result"][0]["meta"].get("regularMarketPrice", 0)
-                if rate:
-                    rates[cur] = rate
+            t = yf.Ticker(pair)
+            hist = t.history(period="1d")
+            if not hist.empty:
+                rates[cur] = float(hist["Close"].iloc[-1])
         except Exception:
             pass
     return rates
 
 
 def fetch_market_cap(ticker: str) -> dict | None:
-    """개별 종목 시가총액 조회"""
-    client = get_yahoo_client()
-    if not client["ok"]:
-        return None
+    """개별 종목 시가총액 조회 (yfinance 사용)"""
     try:
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        params = {"modules": "price", "crumb": client["crumb"]}
-        r = client["session"].get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return None
+        stock = yf.Ticker(ticker)
+        info = stock.info
 
-        result = r.json().get("quoteSummary", {}).get("result")
-        if not result:
-            return None
-
-        p = result[0].get("price", {})
-        mc = p.get("marketCap", {})
-        market_cap = mc.get("raw") if isinstance(mc, dict) else mc
+        market_cap = info.get("marketCap")
         if not market_cap:
             return None
 
-        currency = p.get("currency", "USD")
+        currency = info.get("currency", "USD")
         fx = get_fx_rates()
         rate = fx.get(currency, 1.0)
         market_cap_usd = market_cap * rate
 
-        price_raw = p.get("regularMarketPrice", {})
-        price_val = price_raw.get("raw", 0) if isinstance(price_raw, dict) else price_raw
-
-        chg_raw = p.get("regularMarketChangePercent", {})
-        chg_pct = chg_raw.get("raw", 0) if isinstance(chg_raw, dict) else (chg_raw or 0)
+        price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+        prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose", 0)
+        chg_pct = ((price - prev_close) / prev_close * 100) if prev_close and price else 0
 
         return {
             "ticker": ticker,
-            "name": p.get("shortName", p.get("longName", ticker)),
+            "name": info.get("shortName", info.get("longName", ticker)),
             "market_cap_usd": int(market_cap_usd),
             "market_cap_local": int(market_cap),
             "currency": currency,
-            "price": price_val,
-            "change_pct": round(chg_pct * 100, 2) if chg_pct else 0,
+            "price": price,
+            "change_pct": round(chg_pct, 2),
         }
     except Exception:
         return None
@@ -450,15 +416,12 @@ with st.sidebar:
         st.rerun()
 
 # API 상태 확인
-client = get_yahoo_client()
-if not client["ok"]:
-    st.error("Yahoo Finance API 연결 실패. 잠시 후 다시 시도해 주세요.")
-    st.stop()
-
 fx = get_fx_rates()
 krw_rate = fx.get("KRW", 0)
 if krw_rate:
-    st.info(f"📡 실시간 데이터 | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분")
+    st.info(f"📡 실시간 데이터 (yfinance) | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분")
+else:
+    st.warning("환율 데이터를 불러오지 못했습니다. USD 기준으로 표시됩니다.")
 
 if not selected_sectors:
     st.warning("좌측에서 업종을 선택해 주세요.")
