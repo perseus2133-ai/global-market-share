@@ -31,7 +31,11 @@ def check_password():
     st.title("🔒 로그인")
     password = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인", use_container_width=True):
-        if password == st.secrets.get("password", "9084"):
+        try:
+            correct_pw = st.secrets["password"]
+        except (KeyError, FileNotFoundError):
+            correct_pw = "9084"
+        if password == correct_pw:
             st.session_state.authenticated = True
             st.rerun()
         else:
