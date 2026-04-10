@@ -264,55 +264,85 @@ def get_fx_rates():
     return rates
 
 
-def fetch_stock_data(ticker: str) -> dict | None:
-    """개별 종목 시가총액 + 매출액 조회 (yfinance 사용)"""
+@st.cache_resource(ttl=1800)
+def get_yahoo_session():
+    """Yahoo Finance REST API 세션 (쿠키/크럼 인증, 30분 캐시)"""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    })
+    crumb = None
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        session.get("https://fc.yahoo.com", timeout=10, allow_redirects=True)
+        r = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        if r.status_code == 200:
+            crumb = r.text
+    except Exception:
+        pass
+    return session, crumb
 
-        market_cap = info.get("marketCap")
+
+def fetch_stock_data(ticker: str) -> dict | None:
+    """개별 종목 시가총액 + 매출액 조회 (REST API 직접 호출)"""
+    session, crumb = get_yahoo_session()
+    if not crumb:
+        return None
+    try:
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+        params = {
+            "modules": "price,financialData,incomeStatementHistory",
+            "crumb": crumb,
+        }
+        r = session.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            return None
+
+        result = r.json().get("quoteSummary", {}).get("result")
+        if not result:
+            return None
+
+        data = result[0]
+        p = data.get("price", {})
+        fd = data.get("financialData", {})
+
+        # 시가총액
+        mc_raw = p.get("marketCap", {})
+        market_cap = mc_raw.get("raw") if isinstance(mc_raw, dict) else mc_raw
         if not market_cap:
             return None
 
-        currency = info.get("currency", "USD")
+        currency = p.get("currency", "USD")
         fx = get_fx_rates()
         rate = fx.get(currency, 1.0)
         market_cap_usd = market_cap * rate
 
-        # 매출액 (연간) - info에서 먼저 시도
-        revenue = info.get("totalRevenue") or info.get("revenue", 0)
-
-        # info에 매출이 없으면 재무제표에서 가져오기 (코스닥 종목 등)
+        # 매출액: financialData 먼저, 없으면 incomeStatementHistory에서
+        rev_raw = fd.get("totalRevenue", {})
+        revenue = rev_raw.get("raw") if isinstance(rev_raw, dict) else rev_raw
         if not revenue:
-            try:
-                inc = stock.income_stmt
-                if inc is not None and not inc.empty:
-                    # 'Total Revenue' 행에서 최신 연도 값
-                    for label in ["Total Revenue", "Operating Revenue"]:
-                        if label in inc.index:
-                            val = inc.loc[label].dropna()
-                            if not val.empty:
-                                revenue = int(val.iloc[0])
-                                break
-            except Exception:
-                pass
+            ish = data.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
+            if ish:
+                rev_is = ish[0].get("totalRevenue", {})
+                revenue = rev_is.get("raw") if isinstance(rev_is, dict) else rev_is
+        revenue = revenue or 0
+        revenue_usd = revenue * rate if revenue else 0
 
-        revenue_usd = (revenue * rate) if revenue else 0
-
-        price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-        prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose", 0)
-        chg_pct = ((price - prev_close) / prev_close * 100) if prev_close and price else 0
+        # 현재가 / 등락률
+        price_raw = p.get("regularMarketPrice", {})
+        price = price_raw.get("raw", 0) if isinstance(price_raw, dict) else (price_raw or 0)
+        chg_raw = p.get("regularMarketChangePercent", {})
+        chg_pct = chg_raw.get("raw", 0) if isinstance(chg_raw, dict) else (chg_raw or 0)
 
         return {
             "ticker": ticker,
-            "name": info.get("shortName", info.get("longName", ticker)),
+            "name": p.get("shortName", p.get("longName", ticker)),
             "market_cap_usd": int(market_cap_usd),
             "market_cap_local": int(market_cap),
             "revenue_usd": int(revenue_usd),
             "revenue_local": int(revenue) if revenue else 0,
             "currency": currency,
             "price": price,
-            "change_pct": round(chg_pct, 2),
+            "change_pct": round(chg_pct * 100, 2) if abs(chg_pct) < 1 else round(chg_pct, 2),
         }
     except Exception:
         return None
