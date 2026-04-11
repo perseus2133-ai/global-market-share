@@ -19,44 +19,26 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── 팝업 스타일 (3D 그림자 효과) ──
+# ── 팝업 스타일 (3D 그림자 효과 - 전체 카드 통합) ──
 st.markdown("""
 <style>
 @keyframes popIn {
-    from { opacity: 0; transform: translateY(-10px) scale(0.96); }
+    from { opacity: 0; transform: translateY(-12px) scale(0.95); }
     to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-.popup-overlay {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.35);
-    z-index: 9998;
-    cursor: pointer;
-}
-.popup-card-full {
-    background: linear-gradient(145deg, #ffffff 0%, #f7f8fc 100%);
-    border-radius: 16px;
+/* 팝업 컨테이너 마커 바로 다음 stVerticalBlock에 3D 효과 */
+.popup-marker + div > div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 16px !important;
+    border: 1px solid rgba(180,185,200,0.5) !important;
     box-shadow:
-        0 20px 60px rgba(0,0,0,0.25),
-        0 8px 24px rgba(0,0,0,0.15),
-        0 2px 6px rgba(0,0,0,0.08),
-        inset 0 1px 0 rgba(255,255,255,0.9);
-    border: 1px solid rgba(200,205,215,0.6);
-    padding: 24px 28px;
-    margin: 12px 0 20px 0;
-    animation: popIn 0.25s ease-out;
-    position: relative;
-    z-index: 2;
+        0 24px 80px rgba(0,0,0,0.22),
+        0 10px 30px rgba(0,0,0,0.14),
+        0 3px 8px rgba(0,0,0,0.08) !important;
+    animation: popIn 0.28s ease-out;
+    background: linear-gradient(150deg, #ffffff 0%, #f8f9fc 100%) !important;
 }
-.popup-card-full h4 {
-    margin: 0 0 4px 0;
-    color: #1a1a2e;
-    font-size: 1.15em;
-}
-.popup-card-full .popup-sub {
-    color: #6b7280;
-    font-size: 0.85em;
-    margin-bottom: 12px;
+.popup-marker + div > div[data-testid="stVerticalBlockBorderWrapper"] > div {
+    padding: 20px 24px !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -757,29 +739,27 @@ with tab1:
         c8.caption(f"거래대금 {tv_str}")
         c9.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
 
-        # 📊 팝업: 해당 종목 버튼을 눌렀을 때
+        # 📊 팝업: 해당 종목 버튼을 눌렀을 때 - 전체 통합 3D 카드
         if st.session_state.get("popup_tab1") == code:
-            st.markdown(f"""<div class="popup-card-full">
-                <h4>📊 {name} ({code})</h4>
-                <div class="popup-sub">재무지표 & 컨센서스 · 📊 버튼을 다시 누르면 닫힙니다</div>
-            </div>""", unsafe_allow_html=True)
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("PER", f"{s['PER']:.1f}" if s.get("PER") else "-")
-            m2.metric("PSR", f"{s['PSR']:.1f}" if s.get("PSR") else "-")
-            m3.metric("매출액", format_krw(s["매출액(원)"]))
-            m4.metric("시가총액", format_krw(s["시가총액(원)"]))
-            m5.metric("점유율", f"{s['매출기준점유율']:.1f}%")
-            st.caption(f"💡 {s['핵심강점']}")
-            st.markdown("**📈 연간 실적 & 컨센서스 추정(E)**")
-            with st.spinner("조회 중..."):
-                df_fin = fetch_naver_financial(code)
-            if df_fin is not None and not df_fin.empty:
-                st.dataframe(df_fin, use_container_width=True, hide_index=True)
-                st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
-            else:
-                st.warning("재무 데이터를 불러올 수 없습니다.")
-                st.markdown(f"[네이버 증권에서 직접 확인](https://finance.naver.com/item/coinfo.naver?code={code})")
-            st.markdown("---")
+            st.markdown('<div class="popup-marker"></div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(f"#### 📊 {name} ({code})")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("PER", f"{s['PER']:.1f}" if s.get("PER") else "-")
+                m2.metric("PSR", f"{s['PSR']:.1f}" if s.get("PSR") else "-")
+                m3.metric("매출액", format_krw(s["매출액(원)"]))
+                m4.metric("시가총액", format_krw(s["시가총액(원)"]))
+                m5.metric("점유율", f"{s['매출기준점유율']:.1f}%")
+                st.caption(f"💡 {s['핵심강점']}")
+                st.markdown("**📈 연간 실적 & 컨센서스 추정(E)**")
+                with st.spinner("조회 중..."):
+                    df_fin = fetch_naver_financial(code)
+                if df_fin is not None and not df_fin.empty:
+                    st.dataframe(df_fin, use_container_width=True, hide_index=True)
+                    st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
+                else:
+                    st.warning("재무 데이터를 불러올 수 없습니다.")
+                    st.markdown(f"[네이버 증권에서 직접 확인](https://finance.naver.com/item/coinfo.naver?code={code})")
 
 # ── 탭2: 업종별 상세 ──
 with tab2:
@@ -824,26 +804,24 @@ with tab2:
                 r5.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
                 st.caption(f"거래량 {vol_str} · 거래대금 {tv_str} · 점유율 {k['매출기준점유율']:.1f}%")
 
-                # 팝업
+                # 팝업 - 전체 통합 3D 카드
                 if st.session_state.get(f"popup_t2_{sector_name}") == code:
-                    st.markdown(f"""<div class="popup-card-full">
-                        <h4>📊 {k["기업명"]} ({code})</h4>
-                        <div class="popup-sub">재무지표 & 컨센서스 · 📊 버튼을 다시 누르면 닫힙니다</div>
-                    </div>""", unsafe_allow_html=True)
-                    mc1, mc2, mc3 = st.columns(3)
-                    mc1.metric("PER", f"{k['PER']:.1f}" if k.get("PER") else "-")
-                    mc2.metric("PSR", f"{k['PSR']:.1f}" if k.get("PSR") else "-")
-                    mc3.metric("매출액", format_krw(k["매출액(원)"]))
-                    st.caption(f"💡 {k['핵심강점']}")
-                    st.markdown("**📈 연간 실적 & 컨센서스 추정(E)**")
-                    with st.spinner("조회 중..."):
-                        df_fin2 = fetch_naver_financial(code)
-                    if df_fin2 is not None and not df_fin2.empty:
-                        st.dataframe(df_fin2, use_container_width=True, hide_index=True)
-                        st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
-                    else:
-                        st.warning("재무 데이터를 불러올 수 없습니다.")
-                    st.markdown("---")
+                    st.markdown('<div class="popup-marker"></div>', unsafe_allow_html=True)
+                    with st.container(border=True):
+                        st.markdown(f"#### 📊 {k['기업명']} ({code})")
+                        mc1, mc2, mc3 = st.columns(3)
+                        mc1.metric("PER", f"{k['PER']:.1f}" if k.get("PER") else "-")
+                        mc2.metric("PSR", f"{k['PSR']:.1f}" if k.get("PSR") else "-")
+                        mc3.metric("매출액", format_krw(k["매출액(원)"]))
+                        st.caption(f"💡 {k['핵심강점']}")
+                        st.markdown("**📈 연간 실적 & 컨센서스 추정(E)**")
+                        with st.spinner("조회 중..."):
+                            df_fin2 = fetch_naver_financial(code)
+                        if df_fin2 is not None and not df_fin2.empty:
+                            st.dataframe(df_fin2, use_container_width=True, hide_index=True)
+                            st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
+                        else:
+                            st.warning("재무 데이터를 불러올 수 없습니다.")
 
         with col_gl:
             st.markdown("**🌍 글로벌 경쟁사 (참고)**")
