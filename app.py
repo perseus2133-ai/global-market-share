@@ -19,6 +19,37 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── 팝업 스타일 (3D 그림자 효과) ──
+st.markdown("""
+<style>
+div[data-testid="stExpander"] details[open] > div.streamlit-expanderContent {
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.10);
+    border: 1px solid #e0e0e0;
+    padding: 16px;
+    animation: popIn 0.2s ease-out;
+}
+@keyframes popIn {
+    from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.popup-card {
+    background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+    border-radius: 14px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.22), 0 4px 12px rgba(0,0,0,0.12);
+    border: 1px solid #d0d7de;
+    padding: 20px 24px;
+    margin: 8px 0 16px 0;
+    animation: popIn 0.25s ease-out;
+}
+.popup-card h4 {
+    margin: 0 0 12px 0;
+    color: #1a1a2e;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ── 비밀번호 인증 ──
 def check_password():
     """비밀번호 확인"""
@@ -370,6 +401,9 @@ def fetch_stock_data(ticker: str) -> dict | None:
         per = round(market_cap / net_income, 1) if net_income and net_income > 0 else None
         psr = round(market_cap / revenue, 1) if revenue and revenue > 0 else None
 
+        # 거래대금 = 거래량 × 현재가
+        trade_value = volume * price if volume and price else 0
+
         return {
             "ticker": ticker,
             "name": stock.ticker,
@@ -382,6 +416,7 @@ def fetch_stock_data(ticker: str) -> dict | None:
             "change_pct": round(chg_pct, 2),
             "volume": volume,
             "volume_date": volume_date,
+            "trade_value": int(trade_value),
             "per": per,
             "psr": psr,
         }
@@ -492,6 +527,7 @@ def fetch_sector_data(sector_name: str) -> dict:
                 "등락률": r["change_pct"],
                 "통화": r["currency"],
                 "거래량": r["volume"],
+                "거래대금": r["trade_value"],
                 "거래일": r["volume_date"],
                 "PER": r["per"],
                 "PSR": r["psr"],
@@ -543,6 +579,19 @@ def format_usd(val):
     if val >= 1e6:
         return f"${val/1e6:.0f}M"
     return f"${val:,.0f}"
+
+
+def format_trade_value(val):
+    """거래대금 포맷"""
+    if not val:
+        return "-"
+    if val >= 1e12:
+        return f"{val/1e12:.1f}조"
+    if val >= 1e8:
+        return f"{val/1e8:,.0f}억"
+    if val >= 1e6:
+        return f"{val/1e6:,.0f}백만"
+    return f"{val:,.0f}"
 
 
 # ──────────────────────────────────────────────
@@ -651,19 +700,6 @@ with tab1:
             seen.add(s["종목코드"])
             unique_stocks.append(s)
 
-    df_rank = pd.DataFrame(unique_stocks)
-    df_rank["순위"] = range(1, len(df_rank) + 1)
-    df_rank["매출액"] = df_rank["매출액(원)"].apply(format_krw)
-    df_rank["시총"] = df_rank["시가총액(원)"].apply(format_krw)
-    df_rank["점유율"] = df_rank["매출기준점유율"].apply(lambda x: f"{x:.1f}%")
-    df_rank["등락"] = df_rank["등락률"].apply(lambda x: f"{'🔺' if x > 0 else '🔻' if x < 0 else '▬'} {abs(x):.1f}%")
-    df_rank["현재가표시"] = df_rank.apply(
-        lambda r: f"{r['현재가']:,.0f}원" if r["통화"] == "KRW" else f"${r['현재가']:,.2f}", axis=1
-    )
-    df_rank["거래량표시"] = df_rank["거래량"].apply(lambda x: f"{x:,.0f}" if x else "-")
-    df_rank["PER표시"] = df_rank["PER"].apply(lambda x: f"{x:.1f}" if x else "-")
-    df_rank["PSR표시"] = df_rank["PSR"].apply(lambda x: f"{x:.1f}" if x else "-")
-
     # 거래 기준일 표시
     vol_dates = [s["거래일"] for s in unique_stocks if s.get("거래일")]
     vol_date_str = vol_dates[0] if vol_dates else ""
@@ -684,74 +720,51 @@ with tab1:
     if vol_date_str:
         st.caption(f"📅 거래량 기준일: **{vol_date_str}**")
 
-    # 글로벌 순위 컬럼
-    df_rank["글로벌순위"] = df_rank["글로벌순위표시"]
-    # 네이버증권 링크
-    df_rank["네이버증권"] = df_rank["종목코드"].apply(
-        lambda c: f"https://finance.naver.com/item/main.nhn?code={c}"
-    )
+    # 종목 리스트 (기업명 옆 📊 버튼 포함)
+    for idx, s in enumerate(unique_stocks):
+        code = s["종목코드"]
+        name = s["기업명"]
+        price_str = f"{s['현재가']:,.0f}원" if s["통화"] == "KRW" else f"${s['현재가']:,.2f}"
+        chg = s["등락률"]
+        chg_icon = "🔺" if chg > 0 else ("🔻" if chg < 0 else "▬")
+        vol_str = f"{s['거래량']:,.0f}" if s.get("거래량") else "-"
+        tv_str = format_trade_value(s.get("거래대금", 0))
 
-    # 메인 테이블 (거래량 포함)
-    display_cols = ["순위", "업종", "종목코드", "기업명", "글로벌순위", "현재가표시", "등락", "거래량표시", "점유율", "네이버증권"]
-    st.dataframe(
-        df_rank[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        height=600,
-        column_config={
-            "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
-            "현재가표시": st.column_config.TextColumn("현재가"),
-            "거래량표시": st.column_config.TextColumn("거래량"),
-            "점유율": st.column_config.TextColumn("점유율(매출)"),
-        },
-    )
+        c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([0.4, 0.8, 0.6, 1.2, 0.9, 0.7, 0.9, 0.9, 0.6])
+        c1.markdown(f"**{idx+1}**")
+        c2.markdown(f"**{name}**")
+        c3.button("📊", key=f"fin_t1_{code}", help=f"{name} 재무·컨센서스", on_click=lambda c=code: st.session_state.update({"popup_tab1": c}))
+        c4.caption(f"{s['업종']}")
+        c5.markdown(f"`{price_str}`")
+        c6.markdown(f"{chg_icon} {abs(chg):.1f}%")
+        c7.caption(f"거래량 {vol_str}")
+        c8.caption(f"거래대금 {tv_str}")
+        c9.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
 
-    # 📊 재무지표 & 컨센서스 팝업
-    st.markdown("---")
-    st.markdown("##### 📊 재무지표 & 컨센서스 조회")
-    fin_col1, fin_col2 = st.columns([3, 1])
-    with fin_col1:
-        fin_selected = st.selectbox(
-            "종목 선택",
-            options=[(s["종목코드"], s["기업명"], s.get("PER"), s.get("PSR"), s["매출액(원)"], s["시가총액(원)"], s["핵심강점"]) for s in unique_stocks],
-            format_func=lambda x: f"{x[1]} ({x[0]})",
-            key="fin_popup_tab1",
-        )
-    with fin_col2:
-        st.write("")  # 간격
-        btn_fin = st.button("📊 재무정보 조회", key="btn_fin_tab1", use_container_width=True)
-
-    if btn_fin and fin_selected:
-        code, name, per, psr, rev_krw, mcap_krw, strength = fin_selected
-        st.session_state["show_fin_tab1"] = (code, name, per, psr, rev_krw, mcap_krw, strength)
-
-    if "show_fin_tab1" in st.session_state:
-        code, name, per, psr, rev_krw, mcap_krw, strength = st.session_state["show_fin_tab1"]
-        with st.container(border=True):
-            st.subheader(f"📊 {name} ({code}) 재무정보")
-            # 기본 재무지표
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("PER", f"{per:.1f}" if per else "-")
-            m2.metric("PSR", f"{psr:.1f}" if psr else "-")
-            m3.metric("매출액", format_krw(rev_krw))
-            m4.metric("시가총액", format_krw(mcap_krw))
-            st.caption(f"💡 핵심강점: {strength}")
-            st.divider()
-
-            # 네이버 컨센서스 데이터
-            st.markdown("**📈 연간 실적(A) & 컨센서스 추정(E)**")
-            with st.spinner(f"{name} 재무 데이터 조회 중..."):
-                df_fin = fetch_naver_financial(code)
-            if df_fin is not None and not df_fin.empty:
-                st.dataframe(df_fin, use_container_width=True, hide_index=True)
-                st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
-            else:
-                st.warning("재무 데이터를 불러올 수 없습니다.")
-                st.markdown(f"[📊 네이버 증권에서 직접 확인하기](https://finance.naver.com/item/coinfo.naver?code={code})")
-
-            if st.button("❌ 닫기", key="close_fin_tab1"):
-                del st.session_state["show_fin_tab1"]
-                st.rerun()
+        # 📊 팝업: 해당 종목 버튼을 눌렀을 때
+        if st.session_state.get("popup_tab1") == code:
+            st.markdown(f'<div class="popup-card"><h4>📊 {name} ({code}) 재무정보 & 컨센서스</h4></div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("PER", f"{s['PER']:.1f}" if s.get("PER") else "-")
+                m2.metric("PSR", f"{s['PSR']:.1f}" if s.get("PSR") else "-")
+                m3.metric("매출액", format_krw(s["매출액(원)"]))
+                m4.metric("시가총액", format_krw(s["시가총액(원)"]))
+                m5.metric("점유율", f"{s['매출기준점유율']:.1f}%")
+                st.caption(f"💡 {s['핵심강점']}")
+                st.divider()
+                st.markdown("**📈 연간 실적 & 컨센서스 추정(E)**")
+                with st.spinner("조회 중..."):
+                    df_fin = fetch_naver_financial(code)
+                if df_fin is not None and not df_fin.empty:
+                    st.dataframe(df_fin, use_container_width=True, hide_index=True)
+                    st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
+                else:
+                    st.warning("재무 데이터를 불러올 수 없습니다.")
+                    st.markdown(f"[네이버 증권에서 직접 확인](https://finance.naver.com/item/coinfo.naver?code={code})")
+                if st.button("❌ 닫기", key=f"close_t1_{code}"):
+                    del st.session_state["popup_tab1"]
+                    st.rerun()
 
 # ── 탭2: 업종별 상세 ──
 with tab2:
@@ -769,76 +782,48 @@ with tab2:
 
         with col_kr:
             st.markdown("**🇰🇷 국내 상장 기업**")
-            # 거래 기준일
             kr_vol_dates = [k["거래일"] for k in data["kr"] if k.get("거래일")]
             if kr_vol_dates:
                 st.caption(f"📅 거래량 기준일: **{kr_vol_dates[0]}**")
 
-            kr_rows = []
             kr_sorted = sorted(data["kr"], key=lambda x: x["글로벌순위"])
             for k in kr_sorted:
                 code = k["종목코드"]
                 price_str = f"{k['현재가']:,.0f}원" if k["통화"] == "KRW" else f"${k['현재가']:,.2f}"
+                chg = k["등락률"]
+                chg_icon = "🔺" if chg > 0 else ("🔻" if chg < 0 else "▬")
                 vol_str = f"{k['거래량']:,.0f}" if k.get("거래량") else "-"
-                kr_rows.append({
-                    "글로벌순위": k["글로벌순위표시"],
-                    "종목코드": code,
-                    "기업명": k["기업명"],
-                    "현재가": price_str,
-                    "등락": f"{'🔺' if k['등락률'] > 0 else '🔻' if k['등락률'] < 0 else '▬'}{abs(k['등락률']):.1f}%",
-                    "거래량": vol_str,
-                    "점유율(매출)": f"{k['매출기준점유율']:.1f}%",
-                    "네이버증권": f"https://finance.naver.com/item/main.nhn?code={code}",
-                })
-            kr_df = pd.DataFrame(kr_rows)
-            st.dataframe(
-                kr_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
-                },
-            )
+                tv_str = format_trade_value(k.get("거래대금", 0))
 
-            # 재무지표 팝업 버튼
-            fc1, fc2 = st.columns([3, 1])
-            with fc1:
-                fin_sel2 = st.selectbox(
-                    "재무정보 조회",
-                    [(k["종목코드"], k["기업명"]) for k in kr_sorted],
-                    format_func=lambda x: f"{x[1]} ({x[0]})",
-                    key=f"fin_sel2_{sector_name}",
-                )
-            with fc2:
-                st.write("")
-                btn_fin2 = st.button("📊 재무정보", key=f"btn_fin2_{sector_name}", use_container_width=True)
+                r1, r2, r3, r4, r5 = st.columns([0.4, 1.2, 0.8, 1, 0.6])
+                r1.markdown(f"**{k['글로벌순위표시']}**")
+                r2.markdown(f"**{k['기업명']}**")
+                r3.button("📊", key=f"fin_t2_{sector_name}_{code}", help=f"재무·컨센서스",
+                          on_click=lambda c=code, sn=sector_name: st.session_state.update({f"popup_t2_{sn}": c}))
+                r4.markdown(f"`{price_str}` {chg_icon}{abs(chg):.1f}%")
+                r5.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
+                st.caption(f"거래량 {vol_str} · 거래대금 {tv_str} · 점유율 {k['매출기준점유율']:.1f}%")
 
-            if btn_fin2 and fin_sel2:
-                st.session_state[f"show_fin2_{sector_name}"] = fin_sel2
-
-            if f"show_fin2_{sector_name}" in st.session_state:
-                sel_code, sel_name = st.session_state[f"show_fin2_{sector_name}"]
-                sel_data = next((k for k in kr_sorted if k["종목코드"] == sel_code), None)
-                if sel_data:
+                # 팝업
+                if st.session_state.get(f"popup_t2_{sector_name}") == code:
+                    st.markdown(f'<div class="popup-card"><h4>📊 {k["기업명"]} ({code})</h4></div>', unsafe_allow_html=True)
                     with st.container(border=True):
-                        st.markdown(f"**📊 {sel_name} ({sel_code}) 재무정보**")
-                        mc1, mc2, mc3, mc4 = st.columns(4)
-                        mc1.metric("PER", f"{sel_data['PER']:.1f}" if sel_data.get("PER") else "-")
-                        mc2.metric("PSR", f"{sel_data['PSR']:.1f}" if sel_data.get("PSR") else "-")
-                        mc3.metric("매출액", format_krw(sel_data["매출액(원)"]))
-                        mc4.metric("핵심강점", sel_data["핵심강점"][:8])
+                        mc1, mc2, mc3 = st.columns(3)
+                        mc1.metric("PER", f"{k['PER']:.1f}" if k.get("PER") else "-")
+                        mc2.metric("PSR", f"{k['PSR']:.1f}" if k.get("PSR") else "-")
+                        mc3.metric("매출액", format_krw(k["매출액(원)"]))
+                        st.caption(f"💡 {k['핵심강점']}")
                         st.divider()
-                        st.markdown("**📈 연간 실적(A) & 컨센서스 추정(E)**")
-                        with st.spinner("데이터 조회 중..."):
-                            df_fin2 = fetch_naver_financial(sel_code)
+                        st.markdown("**📈 연간 실적 & 컨센서스 추정(E)**")
+                        with st.spinner("조회 중..."):
+                            df_fin2 = fetch_naver_financial(code)
                         if df_fin2 is not None and not df_fin2.empty:
                             st.dataframe(df_fin2, use_container_width=True, hide_index=True)
                             st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
                         else:
                             st.warning("재무 데이터를 불러올 수 없습니다.")
-                            st.markdown(f"[📊 네이버 증권에서 확인](https://finance.naver.com/item/coinfo.naver?code={sel_code})")
-                        if st.button("❌ 닫기", key=f"close_fin2_{sector_name}"):
-                            del st.session_state[f"show_fin2_{sector_name}"]
+                        if st.button("❌ 닫기", key=f"close_t2_{sector_name}_{code}"):
+                            del st.session_state[f"popup_t2_{sector_name}"]
                             st.rerun()
 
         with col_gl:
