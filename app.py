@@ -5,6 +5,7 @@
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import plotly.express as px
@@ -36,10 +37,14 @@ st.markdown("""
         0 3px 8px rgba(0,0,0,0.08) !important;
     animation: popIn 0.28s ease-out;
     background: linear-gradient(150deg, #ffffff 0%, #f8f9fc 100%) !important;
+    position: relative;
+    z-index: 10;
 }
 .popup-marker + div > div[data-testid="stVerticalBlockBorderWrapper"] > div {
     padding: 20px 24px !important;
 }
+/* 숨김 닫기 버튼 */
+.close-trigger-wrap { height: 0; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -761,6 +766,39 @@ with tab1:
                     st.warning("재무 데이터를 불러올 수 없습니다.")
                     st.markdown(f"[네이버 증권에서 직접 확인](https://finance.naver.com/item/coinfo.naver?code={code})")
 
+    # 팝업 바깥 클릭 닫기: 숨김 버튼 + JS
+    if st.session_state.get("popup_tab1"):
+        st.markdown('<div class="close-trigger-wrap">', unsafe_allow_html=True)
+        if st.button("닫기", key="_auto_close_t1"):
+            st.session_state.pop("popup_tab1", None)
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        components.html("""
+        <script>
+        (function(){
+            const doc = window.parent.document;
+            function handler(e) {
+                // 팝업 내부 클릭이면 무시
+                const markers = doc.querySelectorAll('.popup-marker');
+                for (const m of markers) {
+                    const next = m.nextElementSibling;
+                    if (next && next.contains(e.target)) return;
+                }
+                // 📊 버튼 클릭이면 무시 (토글 처리됨)
+                const btn = e.target.closest('button');
+                if (btn && btn.innerText.trim() === '📊') return;
+                // 숨김 닫기 버튼 찾아서 클릭
+                const allBtns = doc.querySelectorAll('.close-trigger-wrap button');
+                if (allBtns.length > 0) { allBtns[0].click(); }
+                doc.removeEventListener('mousedown', handler);
+            }
+            doc.removeEventListener('mousedown', handler);
+            doc.addEventListener('mousedown', handler);
+        })();
+        </script>
+        """, height=0)
+
 # ── 탭2: 업종별 상세 ──
 with tab2:
     for sector_name in selected_sectors:
@@ -822,6 +860,37 @@ with tab2:
                             st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
                         else:
                             st.warning("재무 데이터를 불러올 수 없습니다.")
+
+            # Tab2 팝업 바깥 클릭 닫기
+            active_popup_t2 = st.session_state.get(f"popup_t2_{sector_name}")
+            if active_popup_t2:
+                st.markdown('<div class="close-trigger-wrap">', unsafe_allow_html=True)
+                if st.button("닫기", key=f"_auto_close_t2_{sector_name}"):
+                    st.session_state.pop(f"popup_t2_{sector_name}", None)
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                components.html("""
+                <script>
+                (function(){
+                    const doc = window.parent.document;
+                    function handler(e) {
+                        const markers = doc.querySelectorAll('.popup-marker');
+                        for (const m of markers) {
+                            const next = m.nextElementSibling;
+                            if (next && next.contains(e.target)) return;
+                        }
+                        const btn = e.target.closest('button');
+                        if (btn && btn.innerText.trim() === '📊') return;
+                        const allBtns = doc.querySelectorAll('.close-trigger-wrap button');
+                        if (allBtns.length > 0) { allBtns[allBtns.length-1].click(); }
+                        doc.removeEventListener('mousedown', handler);
+                    }
+                    doc.removeEventListener('mousedown', handler);
+                    doc.addEventListener('mousedown', handler);
+                })();
+                </script>
+                """, height=0)
 
         with col_gl:
             st.markdown("**🌍 글로벌 경쟁사 (참고)**")
