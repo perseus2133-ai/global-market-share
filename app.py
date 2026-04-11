@@ -389,6 +389,54 @@ def fetch_stock_data(ticker: str) -> dict | None:
         return None
 
 
+@st.cache_data(ttl=600)
+def fetch_naver_financial(stock_code: str) -> pd.DataFrame | None:
+    """네이버 모바일 API에서 연간 재무 데이터 (실적 + 컨센서스 추정) 조회"""
+    try:
+        url = f"https://m.stock.naver.com/api/stock/{stock_code}/finance/annual"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+        fi = data.get("financeInfo")
+        if not fi:
+            return None
+
+        # 기간 헤더
+        periods = fi["trTitleList"]
+        period_keys = [p["key"] for p in periods]
+        period_labels = []
+        for p in periods:
+            label = p["title"].strip(".")
+            if p["isConsensus"] == "Y":
+                label += "(E)"
+            period_labels.append(label)
+
+        # 주요 항목만 선택
+        key_items = ["매출액", "영업이익", "당기순이익", "영업이익률", "ROE",
+                     "EPS", "PER", "BPS", "PBR", "주당배당금"]
+        rows = []
+        for row in fi["rowList"]:
+            title = row["title"]
+            if title not in key_items:
+                continue
+            vals = []
+            for pk in period_keys:
+                col = row["columns"].get(pk, {})
+                v = col.get("value", "-")
+                vals.append(v if v else "-")
+            rows.append({"항목": title, **{label: val for label, val in zip(period_labels, vals)}})
+
+        if not rows:
+            return None
+
+        return pd.DataFrame(rows)
+    except Exception:
+        return None
+
+
 
 @st.cache_data(ttl=600)
 def fetch_sector_data(sector_name: str) -> dict:
@@ -638,24 +686,19 @@ with tab1:
 
     # 글로벌 순위 컬럼
     df_rank["글로벌순위"] = df_rank["글로벌순위표시"]
-    # 재무정보 링크 (컨센서스/매출/영업이익 등)
-    df_rank["재무정보"] = df_rank["종목코드"].apply(
-        lambda c: f"https://finance.naver.com/item/coinfo.naver?code={c}"
-    )
     # 네이버증권 링크
     df_rank["네이버증권"] = df_rank["종목코드"].apply(
         lambda c: f"https://finance.naver.com/item/main.nhn?code={c}"
     )
 
     # 메인 테이블 (거래량 포함)
-    display_cols = ["순위", "업종", "종목코드", "기업명", "글로벌순위", "현재가표시", "등락", "거래량표시", "점유율", "재무정보", "네이버증권"]
+    display_cols = ["순위", "업종", "종목코드", "기업명", "글로벌순위", "현재가표시", "등락", "거래량표시", "점유율", "네이버증권"]
     st.dataframe(
         df_rank[display_cols],
         use_container_width=True,
         hide_index=True,
         height=600,
         column_config={
-            "재무정보": st.column_config.LinkColumn("재무정보", display_text="📊 재무·컨센서스"),
             "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
             "현재가표시": st.column_config.TextColumn("현재가"),
             "거래량표시": st.column_config.TextColumn("거래량"),
@@ -663,21 +706,52 @@ with tab1:
         },
     )
 
-    # 재무지표 (접기/펼치기)
-    with st.expander("📊 재무지표 보기 (PER · PSR · 매출액 · 시총)"):
-        fin_cols = ["순위", "종목코드", "기업명", "PER표시", "PSR표시", "매출액", "시총", "핵심강점"]
-        st.dataframe(
-            df_rank[fin_cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "PER표시": st.column_config.TextColumn("PER"),
-                "PSR표시": st.column_config.TextColumn("PSR"),
-                "매출액": st.column_config.TextColumn("매출액(연간)"),
-            },
+    # 📊 재무지표 & 컨센서스 팝업
+    st.markdown("---")
+    st.markdown("##### 📊 재무지표 & 컨센서스 조회")
+    fin_col1, fin_col2 = st.columns([3, 1])
+    with fin_col1:
+        fin_selected = st.selectbox(
+            "종목 선택",
+            options=[(s["종목코드"], s["기업명"], s.get("PER"), s.get("PSR"), s["매출액(원)"], s["시가총액(원)"], s["핵심강점"]) for s in unique_stocks],
+            format_func=lambda x: f"{x[1]} ({x[0]})",
+            key="fin_popup_tab1",
         )
+    with fin_col2:
+        st.write("")  # 간격
+        btn_fin = st.button("📊 재무정보 조회", key="btn_fin_tab1", use_container_width=True)
 
-    st.caption("💡 테이블의 **재무·컨센서스** 링크를 클릭하면 네이버 증권에서 과거/향후 매출·영업이익을 확인할 수 있습니다.")
+    if btn_fin and fin_selected:
+        code, name, per, psr, rev_krw, mcap_krw, strength = fin_selected
+        st.session_state["show_fin_tab1"] = (code, name, per, psr, rev_krw, mcap_krw, strength)
+
+    if "show_fin_tab1" in st.session_state:
+        code, name, per, psr, rev_krw, mcap_krw, strength = st.session_state["show_fin_tab1"]
+        with st.container(border=True):
+            st.subheader(f"📊 {name} ({code}) 재무정보")
+            # 기본 재무지표
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("PER", f"{per:.1f}" if per else "-")
+            m2.metric("PSR", f"{psr:.1f}" if psr else "-")
+            m3.metric("매출액", format_krw(rev_krw))
+            m4.metric("시가총액", format_krw(mcap_krw))
+            st.caption(f"💡 핵심강점: {strength}")
+            st.divider()
+
+            # 네이버 컨센서스 데이터
+            st.markdown("**📈 연간 실적(A) & 컨센서스 추정(E)**")
+            with st.spinner(f"{name} 재무 데이터 조회 중..."):
+                df_fin = fetch_naver_financial(code)
+            if df_fin is not None and not df_fin.empty:
+                st.dataframe(df_fin, use_container_width=True, hide_index=True)
+                st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
+            else:
+                st.warning("재무 데이터를 불러올 수 없습니다.")
+                st.markdown(f"[📊 네이버 증권에서 직접 확인하기](https://finance.naver.com/item/coinfo.naver?code={code})")
+
+            if st.button("❌ 닫기", key="close_fin_tab1"):
+                del st.session_state["show_fin_tab1"]
+                st.rerun()
 
 # ── 탭2: 업종별 상세 ──
 with tab2:
@@ -701,7 +775,8 @@ with tab2:
                 st.caption(f"📅 거래량 기준일: **{kr_vol_dates[0]}**")
 
             kr_rows = []
-            for k in sorted(data["kr"], key=lambda x: x["글로벌순위"]):
+            kr_sorted = sorted(data["kr"], key=lambda x: x["글로벌순위"])
+            for k in kr_sorted:
                 code = k["종목코드"]
                 price_str = f"{k['현재가']:,.0f}원" if k["통화"] == "KRW" else f"${k['현재가']:,.2f}"
                 vol_str = f"{k['거래량']:,.0f}" if k.get("거래량") else "-"
@@ -713,7 +788,6 @@ with tab2:
                     "등락": f"{'🔺' if k['등락률'] > 0 else '🔻' if k['등락률'] < 0 else '▬'}{abs(k['등락률']):.1f}%",
                     "거래량": vol_str,
                     "점유율(매출)": f"{k['매출기준점유율']:.1f}%",
-                    "재무정보": f"https://finance.naver.com/item/coinfo.naver?code={code}",
                     "네이버증권": f"https://finance.naver.com/item/main.nhn?code={code}",
                 })
             kr_df = pd.DataFrame(kr_rows)
@@ -722,25 +796,50 @@ with tab2:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "재무정보": st.column_config.LinkColumn("재무정보", display_text="📊 재무·컨센서스"),
                     "네이버증권": st.column_config.LinkColumn("네이버증권", display_text="바로가기"),
                 },
             )
 
-            # 재무지표 (접기/펼치기)
-            with st.expander("📊 재무지표 보기 (PER · PSR · 매출액)"):
-                fin_rows = []
-                for k in sorted(data["kr"], key=lambda x: x["글로벌순위"]):
-                    fin_rows.append({
-                        "종목코드": k["종목코드"],
-                        "기업명": k["기업명"],
-                        "PER": f"{k['PER']:.1f}" if k.get("PER") else "-",
-                        "PSR": f"{k['PSR']:.1f}" if k.get("PSR") else "-",
-                        "매출액": format_krw(k["매출액(원)"]),
-                        "핵심강점": k["핵심강점"],
-                    })
-                st.dataframe(pd.DataFrame(fin_rows), use_container_width=True, hide_index=True)
-                st.caption("💡 테이블의 **재무·컨센서스** 링크에서 과거/향후 매출·영업이익을 확인할 수 있습니다.")
+            # 재무지표 팝업 버튼
+            fc1, fc2 = st.columns([3, 1])
+            with fc1:
+                fin_sel2 = st.selectbox(
+                    "재무정보 조회",
+                    [(k["종목코드"], k["기업명"]) for k in kr_sorted],
+                    format_func=lambda x: f"{x[1]} ({x[0]})",
+                    key=f"fin_sel2_{sector_name}",
+                )
+            with fc2:
+                st.write("")
+                btn_fin2 = st.button("📊 재무정보", key=f"btn_fin2_{sector_name}", use_container_width=True)
+
+            if btn_fin2 and fin_sel2:
+                st.session_state[f"show_fin2_{sector_name}"] = fin_sel2
+
+            if f"show_fin2_{sector_name}" in st.session_state:
+                sel_code, sel_name = st.session_state[f"show_fin2_{sector_name}"]
+                sel_data = next((k for k in kr_sorted if k["종목코드"] == sel_code), None)
+                if sel_data:
+                    with st.container(border=True):
+                        st.markdown(f"**📊 {sel_name} ({sel_code}) 재무정보**")
+                        mc1, mc2, mc3, mc4 = st.columns(4)
+                        mc1.metric("PER", f"{sel_data['PER']:.1f}" if sel_data.get("PER") else "-")
+                        mc2.metric("PSR", f"{sel_data['PSR']:.1f}" if sel_data.get("PSR") else "-")
+                        mc3.metric("매출액", format_krw(sel_data["매출액(원)"]))
+                        mc4.metric("핵심강점", sel_data["핵심강점"][:8])
+                        st.divider()
+                        st.markdown("**📈 연간 실적(A) & 컨센서스 추정(E)**")
+                        with st.spinner("데이터 조회 중..."):
+                            df_fin2 = fetch_naver_financial(sel_code)
+                        if df_fin2 is not None and not df_fin2.empty:
+                            st.dataframe(df_fin2, use_container_width=True, hide_index=True)
+                            st.caption("📊 출처: 네이버 증권 | (E) = 컨센서스 추정치")
+                        else:
+                            st.warning("재무 데이터를 불러올 수 없습니다.")
+                            st.markdown(f"[📊 네이버 증권에서 확인](https://finance.naver.com/item/coinfo.naver?code={sel_code})")
+                        if st.button("❌ 닫기", key=f"close_fin2_{sector_name}"):
+                            del st.session_state[f"show_fin2_{sector_name}"]
+                            st.rerun()
 
         with col_gl:
             st.markdown("**🌍 글로벌 경쟁사 (참고)**")
