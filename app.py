@@ -15,7 +15,7 @@ import yfinance as yf
 import time
 
 st.set_page_config(
-    page_title="글로벌 점유율 국내 알짜 종목",
+    page_title="글로벌 경쟁력 국내 알짜 종목",
     page_icon="🔍",
     layout="wide",
 )
@@ -63,7 +63,9 @@ def check_password():
         try:
             correct_pw = st.secrets["password"]
         except (KeyError, FileNotFoundError):
-            correct_pw = "9084"
+            st.error("secrets.toml에 password를 설정해주세요.")
+            st.stop()
+            return False
         if password == correct_pw:
             st.session_state.authenticated = True
             st.rerun()
@@ -318,8 +320,42 @@ def get_fx_rates():
     return rates
 
 
-def fetch_stock_data(ticker: str) -> dict | None:
+def _fetch_naver_market_cap(stock_code: str) -> int:
+    """네이버 모바일 API에서 시가총액 조회 (yfinance 실패 시 fallback)"""
+    try:
+        url = f"https://m.stock.naver.com/api/stock/{stock_code}/basic"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            mc = data.get("marketCap") or data.get("totalMarketValue")
+            if mc:
+                return int(mc)
+    except Exception:
+        pass
+    return 0
+
+
+def fetch_stock_data(ticker: str) -> dict:
     """개별 종목 데이터 조회 (fast_info + history + income_stmt)"""
+    # 실패 시 반환할 기본값
+    default_result = {
+        "ticker": ticker,
+        "name": ticker,
+        "market_cap_usd": 0,
+        "market_cap_local": 0,
+        "revenue_usd": 0,
+        "revenue_local": 0,
+        "currency": "KRW" if ".KS" in ticker or ".KQ" in ticker else "USD",
+        "price": 0,
+        "change_pct": 0,
+        "volume": 0,
+        "volume_date": "",
+        "trade_value": 0,
+        "per": None,
+        "psr": None,
+        "fetch_failed": True,
+    }
     try:
         stock = yf.Ticker(ticker)
 
@@ -327,7 +363,12 @@ def fetch_stock_data(ticker: str) -> dict | None:
         fi = stock.fast_info
         market_cap = fi.get("marketCap", 0) or fi.get("market_cap", 0)
         if not market_cap:
-            return None
+            # Naver API fallback (한국 종목만)
+            if ".KS" in ticker or ".KQ" in ticker:
+                code = ticker.replace(".KS", "").replace(".KQ", "")
+                market_cap = _fetch_naver_market_cap(code)
+            if not market_cap:
+                return default_result
 
         currency = fi.get("currency", "USD")
         fx = get_fx_rates()
@@ -416,9 +457,10 @@ def fetch_stock_data(ticker: str) -> dict | None:
             "trade_value": int(trade_value),
             "per": per,
             "psr": psr,
+            "fetch_failed": False,
         }
     except Exception:
-        return None
+        return default_result
 
 
 @st.cache_data(ttl=600)
@@ -472,7 +514,7 @@ def fetch_naver_financial(stock_code: str) -> pd.DataFrame | None:
 
 @st.cache_data(ttl=600)
 def fetch_sector_data(sector_name: str) -> dict:
-    """업종 전체 데이터 조회 (10분 캐시) - 매출액 기준 점유율"""
+    """업종 전체 데이터 조회 (10분 캐시) - 매출액 기준 리스트내비중"""
     sector = SECTOR_DATA[sector_name]
     kr_tickers = [(t, n) for t, n, _ in sector["kr"] if ".KS" in t or ".KQ" in t]
     gl_tickers = [(t, n) for t, n in sector["global"]]
@@ -484,15 +526,13 @@ def fetch_sector_data(sector_name: str) -> dict:
         for future in as_completed(futures):
             ticker = futures[future]
             data = future.result()
-            if data:
-                results[ticker] = data
+            results[ticker] = data
 
-    # 매출액 기준 점유율 및 순위
+    # 매출액 기준 리스트내비중 및 순위
     total_revenue = sum(r["revenue_usd"] for r in results.values()) or 1
 
     # 매출액 순으로 글로벌 순위 부여
     all_companies = []
-    kr_ticker_set = {t for t, _ in kr_tickers}
     for ticker, data in results.items():
         all_companies.append({
             "ticker": ticker,
@@ -503,57 +543,75 @@ def fetch_sector_data(sector_name: str) -> dict:
     total_companies = len(all_companies)
 
     kr_results = []
+    kr_success = 0
+    kr_fail = 0
     for ticker, name, desc in sector["kr"]:
-        if ticker in results:
-            r = results[ticker]
-            share = r["revenue_usd"] / total_revenue * 100
-            rank = global_rank_map.get(ticker, 0)
-            kr_results.append({
-                "종목코드": ticker.replace(".KS", "").replace(".KQ", ""),
-                "기업명": name,
-                "핵심강점": desc,
-                "매출액(원)": r["revenue_local"],
-                "매출액(USD)": r["revenue_usd"],
-                "시가총액(원)": r["market_cap_local"],
-                "시가총액(USD)": r["market_cap_usd"],
-                "매출기준점유율": round(share, 1),
-                "글로벌순위": rank,
-                "전체기업수": total_companies,
-                "글로벌순위표시": f"{rank}/{total_companies}위",
-                "현재가": r["price"],
-                "등락률": r["change_pct"],
-                "통화": r["currency"],
-                "거래량": r["volume"],
-                "거래대금": r["trade_value"],
-                "거래일": r["volume_date"],
-                "PER": r["per"],
-                "PSR": r["psr"],
-            })
+        r = results.get(ticker)
+        if not r:
+            continue
+        failed = r.get("fetch_failed", False)
+        if failed:
+            kr_fail += 1
+        else:
+            kr_success += 1
+        share = r["revenue_usd"] / total_revenue * 100
+        rank = global_rank_map.get(ticker, 0)
+        kr_results.append({
+            "종목코드": ticker.replace(".KS", "").replace(".KQ", ""),
+            "기업명": name,
+            "핵심강점": desc,
+            "매출액(원)": r["revenue_local"],
+            "매출액(USD)": r["revenue_usd"],
+            "시가총액(원)": r["market_cap_local"],
+            "시가총액(USD)": r["market_cap_usd"],
+            "리스트내비중": round(share, 1),
+            "글로벌순위": rank,
+            "전체기업수": total_companies,
+            "글로벌순위표시": f"{rank}/{total_companies}위",
+            "현재가": r["price"],
+            "등락률": r["change_pct"],
+            "통화": r["currency"],
+            "거래량": r["volume"],
+            "거래대금": r["trade_value"],
+            "거래일": r["volume_date"],
+            "PER": r["per"],
+            "PSR": r["psr"],
+            "조회실패": failed,
+        })
 
     gl_results = []
+    gl_success = 0
+    gl_fail = 0
     for ticker, name in sector["global"]:
-        if ticker in results:
-            r = results[ticker]
-            share = r["revenue_usd"] / total_revenue * 100
-            rank = global_rank_map.get(ticker, 0)
-            gl_results.append({
-                "기업명": name,
-                "티커": ticker,
-                "매출액(USD)": r["revenue_usd"],
-                "시가총액(USD)": r["market_cap_usd"],
-                "매출기준점유율": round(share, 1),
-                "글로벌순위": rank,
-                "글로벌순위표시": f"{rank}/{total_companies}위",
-            })
+        r = results.get(ticker)
+        if not r:
+            continue
+        failed = r.get("fetch_failed", False)
+        if failed:
+            gl_fail += 1
+        else:
+            gl_success += 1
+        share = r["revenue_usd"] / total_revenue * 100
+        rank = global_rank_map.get(ticker, 0)
+        gl_results.append({
+            "기업명": name,
+            "티커": ticker,
+            "매출액(USD)": r["revenue_usd"],
+            "시가총액(USD)": r["market_cap_usd"],
+            "리스트내비중": round(share, 1),
+            "글로벌순위": rank,
+            "글로벌순위표시": f"{rank}/{total_companies}위",
+        })
 
-    kr_total_share = sum(k["매출기준점유율"] for k in kr_results)
+    kr_total_share = sum(k["리스트내비중"] for k in kr_results)
 
     return {
         "kr": kr_results,
         "global": gl_results,
         "kr_total_share": round(kr_total_share, 1),
         "total_revenue": total_revenue,
-        "fetched": len(results),
+        "fetched": kr_success + gl_success,
+        "failed": kr_fail + gl_fail,
         "total": len(all_tickers),
     }
 
@@ -595,8 +653,8 @@ def format_trade_value(val):
 # Streamlit UI
 # ──────────────────────────────────────────────
 
-st.title("🔍 글로벌 점유율 높은 국내 알짜 종목")
-st.caption("소부장(소재/부품/장비) · 화장품 · 의류 · 방산 · K-콘텐츠 등 니치 글로벌 강자 발굴 | **매출액 기준 점유율**")
+st.title("🔍 글로벌 경쟁력 높은 국내 알짜 종목")
+st.caption("소부장(소재/부품/장비) · 화장품 · 의류 · 방산 · K-콘텐츠 등 니치 글로벌 강자 발굴 | **매출액 기준 리스트내비중**")
 
 # 사이드바
 with st.sidebar:
@@ -626,7 +684,7 @@ with st.sidebar:
 fx = get_fx_rates()
 krw_rate = fx.get("KRW", 0)
 if krw_rate:
-    st.info(f"📡 실시간 데이터 (yfinance) | 📊 **매출액 기준** 점유율 | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분")
+    st.info(f"📡 실시간 데이터 (yfinance) | 📊 **매출액 기준 리스트내비중** | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분\n\n※ 이 수치는 조회된 기업 간 매출 비중이며 실제 글로벌 시장점유율과 다릅니다.")
 else:
     st.warning("환율 데이터를 불러오지 못했습니다. USD 기준으로 표시됩니다.")
 
@@ -651,11 +709,19 @@ for i, sector_name in enumerate(selected_sectors):
         sector_summaries.append({
             "업종": sector_name,
             "한국기업수": len(data["kr"]),
-            "한국합산점유율": data["kr_total_share"],
+            "한국합산비중": data["kr_total_share"],
             "업종전체매출": data["total_revenue"],
+            "fetched": data.get("fetched", 0),
+            "failed": data.get("failed", 0),
         })
 
 progress.empty()
+
+# 조회 성공/실패 현황 표시
+total_fetched = sum(s.get("fetched", 0) for s in sector_summaries) if sector_summaries else 0
+total_failed = sum(s.get("failed", 0) for s in sector_summaries) if sector_summaries else 0
+if total_failed > 0:
+    st.caption(f"📡 데이터 조회 완료: 성공 {total_fetched}건 / :red[실패 {total_failed}건]")
 
 if not all_kr_stocks:
     st.error("조회된 데이터가 없습니다.")
@@ -687,12 +753,12 @@ tab1, tab2, tab3 = st.tabs(["📊 종합 랭킹", "📋 업종별 상세", "📈
 
 # ── 탭1: 종합 랭킹 ──
 with tab1:
-    st.subheader("글로벌 점유율 TOP 종목 (시가총액 기준)")
+    st.subheader("리스트내비중 TOP 종목 (매출액 기준)")
 
     # 중복 제거 (같은 종목이 여러 업종에 있을 수 있음)
     seen = set()
     unique_stocks = []
-    for s in sorted(all_kr_stocks, key=lambda x: x["매출기준점유율"], reverse=True):
+    for s in sorted(all_kr_stocks, key=lambda x: x["리스트내비중"], reverse=True):
         if s["종목코드"] not in seen:
             seen.add(s["종목코드"])
             unique_stocks.append(s)
@@ -706,11 +772,11 @@ with tab1:
     with col1:
         st.metric("분석 종목 수", f"{len(unique_stocks)}개")
     with col2:
-        top_share = unique_stocks[0]["매출기준점유율"] if unique_stocks else 0
-        st.metric("최고 점유율 (매출)", f"{top_share:.1f}%")
+        top_share = unique_stocks[0]["리스트내비중"] if unique_stocks else 0
+        st.metric("최고 비중 (매출)", f"{top_share:.1f}%")
     with col3:
-        avg_share = sum(s["매출기준점유율"] for s in unique_stocks) / len(unique_stocks) if unique_stocks else 0
-        st.metric("평균 점유율", f"{avg_share:.1f}%")
+        avg_share = sum(s["리스트내비중"] for s in unique_stocks) / len(unique_stocks) if unique_stocks else 0
+        st.metric("평균 비중", f"{avg_share:.1f}%")
     with col4:
         st.metric("분석 업종", f"{len(selected_sectors)}개")
 
@@ -737,8 +803,12 @@ with tab1:
             else:
                 st.session_state["popup_tab1"] = c
         c3.button("📊", key=f"fin_t1_{code}", help=f"{name} 실적·컨센서스", on_click=toggle_popup_t1)
-        c4.markdown(f"`{price_str}`")
-        c5.markdown(f"{chg_icon} {abs(chg):.1f}%")
+        if s.get("조회실패"):
+            c4.markdown(":red[조회실패]")
+            c5.markdown("")
+        else:
+            c4.markdown(f"`{price_str}`")
+            c5.markdown(f"{chg_icon} {abs(chg):.1f}%")
         c6.caption(f"거래량 {vol_str}")
         c7.caption(f"거래대금 {tv_str}")
         c8.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
@@ -800,7 +870,9 @@ with tab2:
         desc = SECTOR_DATA[sector_name]["description"]
 
         st.subheader(f"{sector_name}")
-        st.caption(f"{desc} | 한국 합산 점유율(매출): **{data['kr_total_share']}%** | 업종 전체 매출: {format_usd(data['total_revenue'])}")
+        fail_count = data.get("failed", 0)
+        fail_text = f" | :red[조회실패: {fail_count}건]" if fail_count else ""
+        st.caption(f"{desc} | 한국 합산 리스트내비중(매출): **{data['kr_total_share']}%** | 업종 전체 매출: {format_usd(data['total_revenue'])}{fail_text}")
 
         col_kr, col_gl = st.columns([3, 2])
 
@@ -829,9 +901,12 @@ with tab2:
                         st.session_state[f"popup_t2_{sn}"] = c
                 r3.button("📊", key=f"fin_t2_{sector_name}_{code}", help=f"실적·컨센서스",
                           on_click=toggle_popup_t2)
-                r4.markdown(f"`{price_str}` {chg_icon}{abs(chg):.1f}%")
+                if k.get("조회실패"):
+                    r4.markdown(":red[조회실패]")
+                else:
+                    r4.markdown(f"`{price_str}` {chg_icon}{abs(chg):.1f}%")
                 r5.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
-                st.caption(f"거래량 {vol_str} · 거래대금 {tv_str} · 점유율 {k['매출기준점유율']:.1f}%")
+                st.caption(f"거래량 {vol_str} · 거래대금 {tv_str} · 비중 {k['리스트내비중']:.1f}%")
 
                 # 팝업 - 실적 테이블만
                 if st.session_state.get(f"popup_t2_{sector_name}") == code:
@@ -887,7 +962,7 @@ with tab2:
                         "기업명": g["기업명"],
                         "티커": g["티커"],
                         "매출액(USD)": format_usd(g["매출액(USD)"]),
-                        "점유율(매출)": f"{g['매출기준점유율']:.1f}%",
+                        "비중(매출)": f"{g['리스트내비중']:.1f}%",
                     })
                 gl_df = pd.DataFrame(gl_rows)
                 st.dataframe(gl_df, use_container_width=True, hide_index=True)
@@ -898,71 +973,71 @@ with tab2:
 
 # ── 탭3: 차트 ──
 with tab3:
-    st.subheader("업종별 한국 기업 글로벌 점유율")
+    st.subheader("업종별 한국 기업 리스트내비중")
 
     if sector_summaries:
         summary_df = pd.DataFrame(sector_summaries)
-        summary_df = summary_df.sort_values("한국합산점유율", ascending=True)
+        summary_df = summary_df.sort_values("한국합산비중", ascending=True)
 
         fig = px.bar(
             summary_df,
-            x="한국합산점유율",
+            x="한국합산비중",
             y="업종",
             orientation="h",
-            text="한국합산점유율",
-            color="한국합산점유율",
+            text="한국합산비중",
+            color="한국합산비중",
             color_continuous_scale="RdYlGn",
         )
         fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
         fig.update_layout(
             height=max(400, len(summary_df) * 35),
-            xaxis_title="한국 기업 합산 점유율 (%)",
+            xaxis_title="한국 기업 합산 리스트내비중 (%)",
             yaxis_title="",
             showlegend=False,
             coloraxis_showscale=False,
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # TOP 15 종목 점유율 차트
-    st.subheader("매출 기준 글로벌 점유율 TOP 15 국내 종목")
+    # TOP 15 종목 리스트내비중 차트
+    st.subheader("매출 기준 리스트내비중 TOP 15 국내 종목")
     if unique_stocks:
         top15 = unique_stocks[:15]
         top15_df = pd.DataFrame(top15)
-        top15_df = top15_df.sort_values("매출기준점유율", ascending=True)
+        top15_df = top15_df.sort_values("리스트내비중", ascending=True)
 
         fig2 = px.bar(
             top15_df,
-            x="매출기준점유율",
+            x="리스트내비중",
             y="기업명",
             orientation="h",
-            text="매출기준점유율",
+            text="리스트내비중",
             color="업종",
             hover_data=["종목코드", "핵심강점"],
         )
         fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
         fig2.update_layout(
             height=500,
-            xaxis_title="글로벌 점유율 - 매출 기준 (%)",
+            xaxis_title="리스트내비중 - 매출 기준 (%)",
             yaxis_title="",
         )
         st.plotly_chart(fig2, use_container_width=True)
 
     # 업종별 파이 차트
-    st.subheader("업종 선택하여 점유율 비교")
+    st.subheader("업종 선택하여 비중 비교")
     selected_pie = st.selectbox("업종 선택", selected_sectors)
     if selected_pie:
         pie_data = fetch_sector_data(selected_pie)
         pie_items = []
         for k in pie_data["kr"]:
-            pie_items.append({"기업": k["기업명"], "점유율": k["매출기준점유율"], "구분": "🇰🇷 한국"})
+            pie_items.append({"기업": k["기업명"], "비중": k["리스트내비중"], "구분": "🇰🇷 한국"})
         for g in pie_data["global"]:
-            pie_items.append({"기업": g["기업명"], "점유율": g["매출기준점유율"], "구분": "🌍 해외"})
+            pie_items.append({"기업": g["기업명"], "비중": g["리스트내비중"], "구분": "🌍 해외"})
 
         if pie_items:
             pie_df = pd.DataFrame(pie_items)
             fig3 = px.pie(
                 pie_df,
-                values="점유율",
+                values="비중",
                 names="기업",
                 color="구분",
                 color_discrete_map={"🇰🇷 한국": "#FF6B6B", "🌍 해외": "#4ECDC4"},
@@ -973,5 +1048,5 @@ with tab3:
 
 # 푸터
 st.divider()
-st.caption("💡 점유율은 리스트 내 기업들의 **연간 매출액(Revenue)** 합계 대비 비율입니다. 업종 내 모든 기업을 포함하지 않으므로 실제 시장점유율과 차이가 있을 수 있습니다.")
+st.caption("💡 리스트내비중은 조회된 기업들의 **연간 매출액(Revenue)** 합계 대비 비율이며, 실제 글로벌 시장점유율과 다릅니다.")
 st.caption("📊 데이터: Yahoo Finance (yfinance) | 환율 자동 변환(KRW→USD)")
