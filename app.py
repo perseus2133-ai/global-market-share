@@ -753,12 +753,12 @@ tab1, tab2, tab3 = st.tabs(["📊 종합 랭킹", "📋 업종별 상세", "📈
 
 # ── 탭1: 종합 랭킹 ──
 with tab1:
-    st.subheader("리스트내비중 TOP 종목 (매출액 기준)")
+    st.subheader("거래대금 TOP 종목")
 
     # 중복 제거 (같은 종목이 여러 업종에 있을 수 있음)
     seen = set()
     unique_stocks = []
-    for s in sorted(all_kr_stocks, key=lambda x: x["리스트내비중"], reverse=True):
+    for s in sorted(all_kr_stocks, key=lambda x: x.get("거래대금") or 0, reverse=True):
         if s["종목코드"] not in seen:
             seen.add(s["종목코드"])
             unique_stocks.append(s)
@@ -999,25 +999,27 @@ with tab3:
         st.plotly_chart(fig, use_container_width=True)
 
     # TOP 15 종목 리스트내비중 차트
-    st.subheader("매출 기준 리스트내비중 TOP 15 국내 종목")
+    st.subheader("거래대금 TOP 15 국내 종목")
     if unique_stocks:
         top15 = unique_stocks[:15]
         top15_df = pd.DataFrame(top15)
-        top15_df = top15_df.sort_values("리스트내비중", ascending=True)
+        top15_df = top15_df.sort_values("거래대금", ascending=True)
 
+        import numpy as np
+        top15_df["거래대금_억"] = top15_df["거래대금"].apply(lambda x: round(x / 1e8, 1) if x else 0)
         fig2 = px.bar(
             top15_df,
-            x="리스트내비중",
+            x="거래대금_억",
             y="기업명",
             orientation="h",
-            text="리스트내비중",
+            text="거래대금_억",
             color="업종",
             hover_data=["종목코드", "핵심강점"],
         )
-        fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig2.update_traces(texttemplate="%{text:.0f}억", textposition="outside")
         fig2.update_layout(
             height=500,
-            xaxis_title="리스트내비중 - 매출 기준 (%)",
+            xaxis_title="거래대금 (억원)",
             yaxis_title="",
         )
         st.plotly_chart(fig2, use_container_width=True)
