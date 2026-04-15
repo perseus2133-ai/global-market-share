@@ -97,7 +97,9 @@ SECTOR_DATA = {
             ("AMAT", "Applied Materials"),
             ("LRCX", "Lam Research"),
             ("KLAC", "KLA Corp"),
+            ("8035.T", "Tokyo Electron(TEL)"),
             ("TER", "Teradyne"),
+            ("6857.T", "Advantest"),
         ],
     },
     # ── 반도체/디스플레이 소재 ──
@@ -111,7 +113,9 @@ SECTOR_DATA = {
         ],
         "global": [
             ("ENTG", "Entegris"),
-            ("CCMP", "CMC Materials"),
+            ("4063.T", "Shin-Etsu(신에츠화학)"),
+            ("3436.T", "SUMCO"),
+            ("4183.T", "Mitsui Chemicals"),
         ],
     },
     # ── 2차전지 소재 ──
@@ -126,6 +130,8 @@ SECTOR_DATA = {
         "global": [
             ("ALB", "Albemarle"),
             ("SQM", "SQM"),
+            ("ALTM", "Arcadium Lithium"),
+            ("BASFY", "BASF"),
             ("BYDDY", "BYD"),
         ],
     },
@@ -141,9 +147,11 @@ SECTOR_DATA = {
             ("078520.KS", "에이블씨엔씨", "미샤 브랜드"),
         ],
         "global": [
-            ("EL", "Estee Lauder"),
-            ("COTY", "Coty"),
             ("LRLCY", "L'Oreal"),
+            ("EL", "Estee Lauder"),
+            ("4911.T", "Shiseido(시세이도)"),
+            ("BDRFY", "Beiersdorf"),
+            ("COTY", "Coty"),
         ],
     },
     # ── 의류/패션 ──
@@ -173,9 +181,11 @@ SECTOR_DATA = {
         ],
         "global": [
             ("DNZOY", "Denso"),
-            ("BWA", "BorgWarner"),
-            ("APTV", "Aptiv"),
             ("MGA", "Magna International"),
+            ("APTV", "Aptiv"),
+            ("CTTAY", "Continental"),
+            ("VLEEY", "Valeo"),
+            ("BWA", "BorgWarner"),
         ],
     },
     # ── 조선/해양 장비 ──
@@ -190,7 +200,9 @@ SECTOR_DATA = {
             ("267260.KS", "HD현대일렉트릭", "선박전기시스템 + 변압기 글로벌 강자"),
         ],
         "global": [
-            ("IMIRY", "Imabari(참고)"),
+            ("7011.T", "Mitsubishi Heavy"),
+            ("WRTBY", "Wartsila"),
+            ("7013.T", "IHI"),
         ],
     },
     # ── 방산/우주 ──
@@ -231,7 +243,7 @@ SECTOR_DATA = {
             ("126700.KQ", "하이비젼시스템", "외관검사장비"),
         ],
         "global": [
-            ("6963.T", "Rohm(참고)"),
+            ("6856.T", "Horiba"),
         ],
     },
     # ── 음식/식품 ──
@@ -245,6 +257,8 @@ SECTOR_DATA = {
         ],
         "global": [
             ("NSRGY", "Nestle"),
+            ("MDLZ", "Mondelez"),
+            ("UL", "Unilever"),
             ("KHC", "Kraft Heinz"),
             ("GIS", "General Mills"),
         ],
@@ -259,7 +273,7 @@ SECTOR_DATA = {
             ("263750.KQ", "펄어비스", "검은사막 글로벌"),
         ],
         "global": [
-            ("ATVI", "Activision(MS)"),
+            ("TCEHY", "Tencent"),
             ("EA", "EA"),
             ("TTWO", "Take-Two"),
             ("NTES", "NetEase"),
@@ -289,9 +303,11 @@ SECTOR_DATA = {
             ("034020.KS", "두산에너빌리티", "원전 주기기 글로벌 경쟁력"),
         ],
         "global": [
+            ("GEV", "GE Vernova"),
+            ("ABB", "ABB"),
+            ("SMNEY", "Siemens Energy"),
             ("ETN", "Eaton"),
             ("EMR", "Emerson Electric"),
-            ("GE", "GE Vernova"),
         ],
     },
 }
@@ -355,6 +371,7 @@ def fetch_stock_data(ticker: str) -> dict:
         "per": None,
         "psr": None,
         "fetch_failed": True,
+        "revenue_period": "",
     }
     try:
         stock = yf.Ticker(ticker)
@@ -391,26 +408,60 @@ def fetch_stock_data(ticker: str) -> dict:
         except Exception:
             pass
 
-        # 매출액 + 순이익: income_stmt에서 조회
+        # 매출액 + 순이익: TTM(최근 4분기 합산) 우선, 실패 시 annual fallback
         revenue = 0
+        revenue_period = ""
         net_income = 0
+
+        # TTM: quarterly_income_stmt 최근 4분기 합산
         try:
-            inc = stock.income_stmt
-            if inc is not None and not inc.empty:
+            q_inc = stock.quarterly_income_stmt
+            if q_inc is not None and not q_inc.empty:
                 for label in ["Total Revenue", "Operating Revenue", "Revenue"]:
-                    if label in inc.index:
-                        val = inc.loc[label].dropna()
-                        if not val.empty:
-                            revenue = int(val.iloc[0])
+                    if label in q_inc.index:
+                        vals = q_inc.loc[label].dropna()
+                        if len(vals) >= 4:
+                            revenue = int(vals.iloc[:4].sum())
+                            revenue_period = "TTM"
                             break
+                        elif len(vals) > 0:
+                            revenue = int(vals.iloc[0] * 4)
+                            revenue_period = "TTM(추정)"
+                            break
+                # 순이익도 분기 데이터에서 TTM 합산
                 for label in ["Net Income", "Net Income Common Stockholders"]:
-                    if label in inc.index:
-                        val = inc.loc[label].dropna()
-                        if not val.empty:
-                            net_income = int(val.iloc[0])
+                    if label in q_inc.index:
+                        vals = q_inc.loc[label].dropna()
+                        if len(vals) >= 4:
+                            net_income = int(vals.iloc[:4].sum())
+                            break
+                        elif len(vals) > 0:
+                            net_income = int(vals.iloc[0] * 4)
                             break
         except Exception:
             pass
+
+        # TTM 실패 시 annual income_stmt fallback
+        if not revenue:
+            try:
+                inc = stock.income_stmt
+                if inc is not None and not inc.empty:
+                    for label in ["Total Revenue", "Operating Revenue", "Revenue"]:
+                        if label in inc.index:
+                            val = inc.loc[label].dropna()
+                            if not val.empty:
+                                revenue = int(val.iloc[0])
+                                revenue_period = "FY(연간)"
+                                break
+                    if not net_income:
+                        for label in ["Net Income", "Net Income Common Stockholders"]:
+                            if label in inc.index:
+                                val = inc.loc[label].dropna()
+                                if not val.empty:
+                                    net_income = int(val.iloc[0])
+                                    break
+            except Exception:
+                pass
 
         # income_stmt 실패 시 financials로 시도
         if not revenue:
@@ -422,6 +473,7 @@ def fetch_stock_data(ticker: str) -> dict:
                             val = fins.loc[label].dropna()
                             if not val.empty:
                                 revenue = int(val.iloc[0])
+                                revenue_period = "FY(연간)"
                                 break
                     if not net_income:
                         for label in ["Net Income", "Net Income Common Stockholders"]:
@@ -458,6 +510,7 @@ def fetch_stock_data(ticker: str) -> dict:
             "per": per,
             "psr": psr,
             "fetch_failed": False,
+            "revenue_period": revenue_period,
         }
     except Exception:
         return default_result
@@ -577,6 +630,7 @@ def fetch_sector_data(sector_name: str) -> dict:
             "PER": r["per"],
             "PSR": r["psr"],
             "조회실패": failed,
+            "매출기준": r.get("revenue_period", ""),
         })
 
     gl_results = []
@@ -601,6 +655,7 @@ def fetch_sector_data(sector_name: str) -> dict:
             "리스트내비중": round(share, 1),
             "글로벌순위": rank,
             "글로벌순위표시": f"{rank}/{total_companies}위",
+            "매출기준": r.get("revenue_period", ""),
         })
 
     kr_total_share = sum(k["리스트내비중"] for k in kr_results)
@@ -684,7 +739,7 @@ with st.sidebar:
 fx = get_fx_rates()
 krw_rate = fx.get("KRW", 0)
 if krw_rate:
-    st.info(f"📡 실시간 데이터 (yfinance) | 📊 **매출액 기준 리스트내비중** | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분\n\n※ 이 수치는 조회된 기업 간 매출 비중이며 실제 글로벌 시장점유율과 다릅니다.")
+    st.info(f"📡 실시간 데이터 (yfinance) | 📊 **매출액 기준 리스트내비중** | 환율: 1 USD = {1/krw_rate:,.0f} KRW | 캐시: 10분 | 💡 매출: TTM 기준(최근 4분기 합산, 미지원 시 FY 연간 fallback)\n\n※ 이 수치는 조회된 기업 간 매출 비중이며 실제 글로벌 시장점유율과 다릅니다.")
 else:
     st.warning("환율 데이터를 불러오지 못했습니다. USD 기준으로 표시됩니다.")
 
@@ -906,7 +961,8 @@ with tab2:
                 else:
                     r4.markdown(f"`{price_str}` {chg_icon}{abs(chg):.1f}%")
                 r5.markdown(f"[네이버](https://finance.naver.com/item/main.nhn?code={code})")
-                st.caption(f"거래량 {vol_str} · 거래대금 {tv_str} · 비중 {k['리스트내비중']:.1f}%")
+                rev_period_str = f" · 매출: {k['매출기준']}" if k.get("매출기준") else ""
+                st.caption(f"거래량 {vol_str} · 거래대금 {tv_str} · 비중 {k['리스트내비중']:.1f}%{rev_period_str}")
 
                 # 팝업 - 실적 테이블만
                 if st.session_state.get(f"popup_t2_{sector_name}") == code:
@@ -954,6 +1010,8 @@ with tab2:
 
         with col_gl:
             st.markdown("**🌍 글로벌 경쟁사 (참고)**")
+            if sector_name == "2차전지 장비":
+                st.caption("ℹ️ 배터리 장비 순수 상장사는 글로벌에 거의 없어 비교군이 제한적입니다.")
             if data["global"]:
                 gl_rows = []
                 for g in sorted(data["global"], key=lambda x: x["글로벌순위"]):
@@ -963,6 +1021,7 @@ with tab2:
                         "티커": g["티커"],
                         "매출액(USD)": format_usd(g["매출액(USD)"]),
                         "비중(매출)": f"{g['리스트내비중']:.1f}%",
+                        "매출기준": g.get("매출기준", ""),
                     })
                 gl_df = pd.DataFrame(gl_rows)
                 st.dataframe(gl_df, use_container_width=True, hide_index=True)
